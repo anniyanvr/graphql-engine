@@ -29,6 +29,21 @@ def mk_add_remote_q(name, url, headers=None, client_hdrs=False, timeout=None):
         }
     }
 
+def mk_update_remote_q(name, url, headers=None, client_hdrs=False, timeout=None):
+    return {
+        "type": "update_remote_schema",
+        "args": {
+            "name": name,
+            "comment": "testing " + name,
+            "definition": {
+                "url": url,
+                "headers": headers,
+                "forward_client_headers": client_hdrs,
+                "timeout_seconds": timeout
+            }
+        }
+    }
+
 def mk_delete_remote_q(name):
     return {
         "type" : "remove_remote_schema",
@@ -45,6 +60,7 @@ def mk_reload_remote_q(name):
         }
     }
 
+export_metadata_q = {"type": "export_metadata", "args": {}}
 
 class TestRemoteSchemaBasic:
     """ basic => no hasura tables are tracked """
@@ -66,12 +82,46 @@ class TestRemoteSchemaBasic:
             hge_ctx.v1q(self.teardown)
 
     def test_add_schema(self, hge_ctx):
-        """ check if the remote schema is added in the db """
-        conn = hge_ctx.engine.connect()
-        res = conn.execute('select * from hdb_catalog.remote_schemas')
-        row = res.fetchone()
-        assert row['name'] == "simple 1"
-        conn.close()
+        """ check if the remote schema is added in the metadata """
+        st_code, resp = hge_ctx.v1q(export_metadata_q)
+        assert st_code == 200, resp
+        assert resp['remote_schemas'][0]['name'] == "simple 1"
+    
+    def test_update_schema_with_no_url_change(self, hge_ctx):
+        """ call update_remote_schema API and check the details stored in metadata """
+        q = mk_update_remote_q('simple 1', 'http://localhost:5000/hello-graphql', None, True, 120)
+        st_code, resp = hge_ctx.v1q(q)
+        assert st_code == 200, resp
+
+        st_code, resp = hge_ctx.v1q(export_metadata_q)
+        assert st_code == 200, resp
+        assert resp['remote_schemas'][0]['name'] == "simple 1"
+        assert resp['remote_schemas'][0]['definition']['timeout_seconds'] == 120
+        assert resp['remote_schemas'][0]['definition']['forward_client_headers'] == True
+
+        """ revert to original config for remote schema """
+        q = mk_update_remote_q('simple 1', 'http://localhost:5000/hello-graphql', None, False, 60)
+        st_code, resp = hge_ctx.v1q(q)
+        assert st_code == 200, resp
+
+    def test_update_schema_with_url_change(self, hge_ctx):
+        """ call update_remote_schema API and check the details stored in metadata """
+        q = mk_update_remote_q('simple 1', 'http://localhost:5000/user-graphql', None, True, 80)
+        st_code, resp = hge_ctx.v1q(q)
+        # This should succeed since there isn't any conflicting relations or permissions set up
+        assert st_code == 200, resp
+
+        st_code, resp = hge_ctx.v1q(export_metadata_q)
+        assert st_code == 200, resp
+        assert resp['remote_schemas'][0]['name'] == "simple 1"
+        assert resp['remote_schemas'][0]['definition']['url'] == 'http://localhost:5000/user-graphql'
+        assert resp['remote_schemas'][0]['definition']['timeout_seconds'] == 80
+        assert resp['remote_schemas'][0]['definition']['forward_client_headers'] == True
+
+        """ revert to original config for remote schema """
+        q = mk_update_remote_q('simple 1', 'http://localhost:5000/hello-graphql', None, False, 60)
+        st_code, resp = hge_ctx.v1q(q)
+        assert st_code == 200, resp
 
     @pytest.mark.allow_server_upgrade_test
     def test_introspection(self, hge_ctx):
@@ -214,17 +264,17 @@ class TestAddRemoteSchemaTbls:
 
     @pytest.mark.allow_server_upgrade_test
     def test_add_schema(self, hge_ctx):
-        """ check if the remote schema is added in the db """
-        res = hge_ctx.sql('select * from hdb_catalog.remote_schemas')
-        row = res.fetchone()
-        assert row['name'] == "simple2-graphql"
+        """ check if the remote schema is added in the metadata """
+        st_code, resp = hge_ctx.v1q(export_metadata_q)
+        assert st_code == 200, resp
+        assert resp['remote_schemas'][0]['name'] == "simple2-graphql"
 
     def test_add_schema_conflicts_with_tables(self, hge_ctx):
         """add remote schema which conflicts with hasura tables"""
         q = mk_add_remote_q('simple2', 'http://localhost:5000/hello-graphql')
         st_code, resp = hge_ctx.v1q(q)
         assert st_code == 400
-        assert resp['code'] == 'constraint-violation'
+        assert resp['code'] == 'invalid-configuration'
 
     @pytest.mark.allow_server_upgrade_test
     def test_add_second_remote_schema(self, hge_ctx):
@@ -246,6 +296,9 @@ class TestAddRemoteSchemaTbls:
         st_code, resp = hge_ctx.v1q_f(self.dir + '/create_conflicting_table.yaml')
         assert st_code == 400
         assert resp['code'] == 'remote-schema-conflicts'
+        # Drop "user" table which is created in the previous test
+        st_code, resp = hge_ctx.v1q_f(self.dir + '/drop_user_table.yaml')
+        assert st_code == 200, resp
 
     def test_introspection(self, hge_ctx):
         with open('queries/graphql_introspection/introspection.yaml') as f:

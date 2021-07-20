@@ -1,68 +1,121 @@
-{-# LANGUAGE ViewPatterns #-}
 module Hasura.RQL.DDL.RemoteSchema
   ( runAddRemoteSchema
   , runRemoveRemoteSchema
-  , removeRemoteSchemaFromCatalog
+  , dropRemoteSchemaInMetadata
   , runReloadRemoteSchema
-  , fetchRemoteSchemas
   , addRemoteSchemaP1
   , addRemoteSchemaP2Setup
-  , addRemoteSchemaP2
   , runIntrospectRemoteSchema
-  , addRemoteSchemaToCatalog
+  , dropRemoteSchemaPermissionInMetadata
+  , runAddRemoteSchemaPermissions
+  , runDropRemoteSchemaPermissions
+  , runUpdateRemoteSchema
   ) where
 
 import           Hasura.Prelude
+import           Hasura.RQL.DDL.RemoteSchema.Permission
 
-import qualified Data.Aeson                  as J
-import qualified Data.Environment            as Env
-import qualified Data.HashMap.Strict         as Map
-import qualified Data.HashSet                as S
-import qualified Database.PG.Query           as Q
+import qualified Data.Environment                       as Env
+import qualified Data.HashMap.Strict                    as Map
+import qualified Data.HashMap.Strict.InsOrd             as OMap
+import qualified Data.HashSet                           as S
 
 import           Control.Monad.Unique
-
-import           Hasura.EncJSON
--- import           Hasura.GraphQL.NormalForm
-import           Hasura.GraphQL.RemoteServer
--- import           Hasura.GraphQL.Schema.Merge
 import           Data.Text.Extended
+import           Network.HTTP.Client.Extended
+
+import           Hasura.Base.Error
+import           Hasura.EncJSON
+import           Hasura.GraphQL.RemoteServer
 import           Hasura.RQL.DDL.Deps
 import           Hasura.RQL.Types
-import           Hasura.Server.Version       (HasVersion)
-
+import           Hasura.Server.Version                  (HasVersion)
+import           Hasura.Session
 
 runAddRemoteSchema
   :: ( HasVersion
      , QErrM m
      , CacheRWM m
-     , MonadTx m
      , MonadIO m
      , MonadUnique m
-     , HasHttpManager m
+     , HasHttpManagerM m
+     , MetadataM m
      )
   => Env.Environment
   -> AddRemoteSchemaQuery
   -> m EncJSON
-runAddRemoteSchema env q = do
+runAddRemoteSchema env q@(AddRemoteSchemaQuery name defn comment) = do
   addRemoteSchemaP1 name
-  addRemoteSchemaP2 env q
-  buildSchemaCacheFor $ MORemoteSchema name
+  -- addRemoteSchemaP2 env q
+  void $ addRemoteSchemaP2Setup env q
+  buildSchemaCacheFor (MORemoteSchema name) $
+    MetadataModifier $ metaRemoteSchemas %~ OMap.insert name remoteSchemaMeta
   pure successMsg
   where
-    name = _arsqName q
+    remoteSchemaMeta = RemoteSchemaMetadata name defn comment mempty
+
+runAddRemoteSchemaPermissions
+  :: ( QErrM m
+     , CacheRWM m
+     , HasServerConfigCtx m
+     , MetadataM m
+     )
+  => AddRemoteSchemaPermissions
+  -> m EncJSON
+runAddRemoteSchemaPermissions q = do
+  remoteSchemaPermsCtx <- _sccRemoteSchemaPermsCtx <$> askServerConfigCtx
+  unless (remoteSchemaPermsCtx == RemoteSchemaPermsEnabled) $ do
+    throw400 ConstraintViolation
+      $ "remote schema permissions can only be added when "
+      <> "remote schema permissions are enabled in the graphql-engine"
+  remoteSchemaMap <- scRemoteSchemas <$> askSchemaCache
+  remoteSchemaCtx <-
+    onNothing (Map.lookup name remoteSchemaMap) $
+      throw400 NotExists $ "remote schema " <> name <<> " doesn't exist"
+  onJust (Map.lookup role $ _rscPermissions remoteSchemaCtx) $ \_ ->
+    throw400 AlreadyExists $ "permissions for role: " <> role <<> " for remote schema:"
+      <> name <<> " already exists"
+  resolveRoleBasedRemoteSchema providedSchemaDoc remoteSchemaCtx
+  buildSchemaCacheFor (MORemoteSchemaPermissions name role) $
+    MetadataModifier $ metaRemoteSchemas.ix name.rsmPermissions %~ (:) remoteSchemaPermMeta
+  pure successMsg
+  where
+    AddRemoteSchemaPermissions name role defn comment = q
+
+    remoteSchemaPermMeta = RemoteSchemaPermissionMetadata role defn comment
+
+    providedSchemaDoc = _rspdSchema defn
+
+runDropRemoteSchemaPermissions
+  :: ( QErrM m
+     , CacheRWM m
+     , MetadataM m
+     )
+  => DropRemoteSchemaPermissions
+  -> m EncJSON
+runDropRemoteSchemaPermissions (DropRemoteSchemaPermissions name roleName) = do
+  remoteSchemaMap <- scRemoteSchemas <$> askSchemaCache
+  RemoteSchemaCtx _ _ _ _ _ perms <-
+    onNothing (Map.lookup name remoteSchemaMap) $
+      throw400 NotExists $ "remote schema " <> name <<> " doesn't exist"
+  onNothing (Map.lookup roleName perms) $
+    throw400 NotExists $ "permissions for role: " <> roleName <<> " for remote schema:"
+     <> name <<> " doesn't exist"
+  buildSchemaCacheFor (MORemoteSchemaPermissions name roleName) $
+    dropRemoteSchemaPermissionInMetadata name roleName
+  pure successMsg
 
 addRemoteSchemaP1
   :: (QErrM m, CacheRM m)
   => RemoteSchemaName -> m ()
 addRemoteSchemaP1 name = do
-  remoteSchemaMap <- scRemoteSchemas <$> askSchemaCache
-  onJust (Map.lookup name remoteSchemaMap) $ const $
+  remoteSchemaNames <- getAllRemoteSchemas <$> askSchemaCache
+  when (name `elem` remoteSchemaNames) $
     throw400 AlreadyExists $ "remote schema with name "
     <> name <<> " already exists"
 
 addRemoteSchemaP2Setup
-  :: (HasVersion, QErrM m, MonadIO m, MonadUnique m, HasHttpManager m)
+  :: (HasVersion, QErrM m, MonadIO m, MonadUnique m, HasHttpManagerM m)
   => Env.Environment
   -> AddRemoteSchemaQuery -> m RemoteSchemaCtx
 addRemoteSchemaP2Setup env (AddRemoteSchemaQuery name def _) = do
@@ -70,36 +123,47 @@ addRemoteSchemaP2Setup env (AddRemoteSchemaQuery name def _) = do
   rsi <- validateRemoteSchemaDef env def
   fetchRemoteSchema env httpMgr name rsi
 
-addRemoteSchemaP2
-  :: (HasVersion, MonadTx m, MonadIO m, MonadUnique m, HasHttpManager m) => Env.Environment -> AddRemoteSchemaQuery -> m ()
-addRemoteSchemaP2 env q = do
-  void $ addRemoteSchemaP2Setup env q
-  liftTx $ addRemoteSchemaToCatalog q
-
 runRemoveRemoteSchema
-  :: (QErrM m, UserInfoM m, CacheRWM m, MonadTx m)
+  :: (QErrM m, UserInfoM m, CacheRWM m, MetadataM m)
   => RemoteSchemaNameQuery -> m EncJSON
 runRemoveRemoteSchema (RemoteSchemaNameQuery rsn) = do
   removeRemoteSchemaP1 rsn
-  liftTx $ removeRemoteSchemaFromCatalog rsn
-  withNewInconsistentObjsCheck buildSchemaCache
+  withNewInconsistentObjsCheck $ buildSchemaCache $
+    dropRemoteSchemaInMetadata rsn
   pure successMsg
 
 removeRemoteSchemaP1
   :: (UserInfoM m, QErrM m, CacheRM m)
-  => RemoteSchemaName -> m ()
+  => RemoteSchemaName -> m [RoleName]
 removeRemoteSchemaP1 rsn = do
   sc <- askSchemaCache
   let rmSchemas = scRemoteSchemas sc
   void $ onNothing (Map.lookup rsn rmSchemas) $
     throw400 NotExists "no such remote schema"
   let depObjs = getDependentObjs sc remoteSchemaDepId
-  when (depObjs /= []) $ reportDeps depObjs
+      roles = mapMaybe getRole depObjs
+      nonPermDependentObjs = filter nonPermDependentObjPredicate depObjs
+  -- report non permission dependencies (if any), this happens
+  -- mostly when a remote relationship is defined with
+  -- the current remote schema
+
+  -- we only report the non permission dependencies because we
+  -- drop the related permissions
+  unless (null nonPermDependentObjs) $ reportDeps nonPermDependentObjs
+  pure roles
   where
     remoteSchemaDepId = SORemoteSchema rsn
 
+    getRole depObj =
+      case depObj of
+        SORemoteSchemaPermission _ role -> Just role
+        _                               -> Nothing
+
+    nonPermDependentObjPredicate (SORemoteSchemaPermission _ _) = False
+    nonPermDependentObjPredicate _                              = True
+
 runReloadRemoteSchema
-  :: (QErrM m, CacheRWM m)
+  :: (QErrM m, CacheRWM m, MetadataM m)
   => RemoteSchemaNameQuery -> m EncJSON
 runReloadRemoteSchema (RemoteSchemaNameQuery name) = do
   remoteSchemas <- getAllRemoteSchemas <$> askSchemaCache
@@ -107,44 +171,70 @@ runReloadRemoteSchema (RemoteSchemaNameQuery name) = do
     "remote schema with name " <> name <<> " does not exist"
 
   let invalidations = mempty { ciRemoteSchemas = S.singleton name }
-  withNewInconsistentObjsCheck $ buildSchemaCacheWithOptions CatalogUpdate invalidations
+  metadata <- getMetadata
+  withNewInconsistentObjsCheck $
+    buildSchemaCacheWithOptions CatalogUpdate invalidations metadata
   pure successMsg
 
-addRemoteSchemaToCatalog
-  :: AddRemoteSchemaQuery
-  -> Q.TxE QErr ()
-addRemoteSchemaToCatalog (AddRemoteSchemaQuery name def comment) =
-  Q.unitQE defaultTxErrorHandler [Q.sql|
-    INSERT into hdb_catalog.remote_schemas
-      (name, definition, comment)
-      VALUES ($1, $2, $3)
-  |] (name, Q.AltJ $ J.toJSON def, comment) True
+dropRemoteSchemaInMetadata :: RemoteSchemaName -> MetadataModifier
+dropRemoteSchemaInMetadata name =
+  MetadataModifier $ metaRemoteSchemas %~ OMap.delete name
 
-removeRemoteSchemaFromCatalog :: RemoteSchemaName -> Q.TxE QErr ()
-removeRemoteSchemaFromCatalog name =
-  Q.unitQE defaultTxErrorHandler [Q.sql|
-    DELETE FROM hdb_catalog.remote_schemas
-      WHERE name = $1
-  |] (Identity name) True
-
-fetchRemoteSchemas :: Q.TxE QErr [AddRemoteSchemaQuery]
-fetchRemoteSchemas =
-  map fromRow <$> Q.listQE defaultTxErrorHandler
-    [Q.sql|
-     SELECT name, definition, comment
-       FROM hdb_catalog.remote_schemas
-     ORDER BY name ASC
-     |] () True
-  where
-    fromRow (name, Q.AltJ def, comment) =
-      AddRemoteSchemaQuery name def comment
+dropRemoteSchemaPermissionInMetadata :: RemoteSchemaName -> RoleName -> MetadataModifier
+dropRemoteSchemaPermissionInMetadata remoteSchemaName roleName =
+  MetadataModifier $ metaRemoteSchemas.ix remoteSchemaName.rsmPermissions %~ filter ((/=) roleName . _rspmRole)
 
 runIntrospectRemoteSchema
   :: (CacheRM m, QErrM m) => RemoteSchemaNameQuery -> m EncJSON
 runIntrospectRemoteSchema (RemoteSchemaNameQuery rsName) = do
   sc <- askSchemaCache
-  (RemoteSchemaCtx _ _ _ introspectionByteString _) <-
-    onNothing (Map.lookup rsName (scRemoteSchemas sc)) $
-    throw400 NotExists $
-    "remote schema: " <> rsName <<> " not found"
+  RemoteSchemaCtx _ _ _ introspectionByteString _ _ <-
+    Map.lookup rsName (scRemoteSchemas sc) `onNothing` throw400 NotExists ("remote schema: " <> rsName <<> " not found")
   pure $ encJFromLBS introspectionByteString
+
+runUpdateRemoteSchema
+  :: (HasVersion
+     , QErrM m
+     , CacheRWM m
+     , MonadIO m
+     , MonadUnique m
+     , HasHttpManagerM m
+     , MetadataM m
+     )
+  => Env.Environment
+  -> AddRemoteSchemaQuery
+  -> m EncJSON
+runUpdateRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
+  remoteSchemaNames <- getAllRemoteSchemas <$> askSchemaCache
+  remoteSchemaMap   <- _metaRemoteSchemas  <$> getMetadata
+
+  let metadataRMSchema           = OMap.lookup name remoteSchemaMap
+      metadataRMSchemaPerms      = maybe mempty _rsmPermissions metadataRMSchema
+      -- `metadataRMSchemaURL` and `metadataRMSchemaURLFromEnv` represent
+      -- details that were stored within the metadata
+      metadataRMSchemaURL        = (_rsdUrl . _rsmDefinition) =<< metadataRMSchema
+      metadataRMSchemaURLFromEnv = (_rsdUrlFromEnv . _rsmDefinition) =<< metadataRMSchema
+      -- `currentRMSchemaURL` and `currentRMSchemaURLFromEnv` represent
+      -- the details that were provided in the request
+      currentRMSchemaURL         = _rsdUrl defn
+      currentRMSchemaURLFromEnv  = _rsdUrlFromEnv defn
+
+  unless (name `elem` remoteSchemaNames) $
+    throw400 NotExists $ "remote schema with name " <> name <<> " doesn't exist"
+
+  rsi <- validateRemoteSchemaDef env defn
+
+  -- we only proceed to fetch the remote schema if the url has been updated
+  unless ((isJust metadataRMSchemaURL && isJust currentRMSchemaURL && metadataRMSchemaURL == currentRMSchemaURL) ||
+         (isJust metadataRMSchemaURLFromEnv && isJust currentRMSchemaURLFromEnv && metadataRMSchemaURLFromEnv == currentRMSchemaURLFromEnv)) $ do
+      httpMgr <- askHttpManager
+      void $ fetchRemoteSchema env httpMgr name rsi
+
+  -- This will throw an error if the new schema fetched in incompatible
+  -- with the existing permissions and relations
+  withNewInconsistentObjsCheck $ buildSchemaCacheFor (MORemoteSchema name) $
+    MetadataModifier $ metaRemoteSchemas %~ OMap.insert name (remoteSchemaMeta metadataRMSchemaPerms)
+
+  pure successMsg
+  where
+    remoteSchemaMeta perms = RemoteSchemaMetadata name defn comment perms
