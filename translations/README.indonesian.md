@@ -16,7 +16,7 @@ Baca lebih lanjut di [hasura.io](https://hasura.io) dan [dokumentasinya](https:/
 
 ------------------
 
-![Demo Hasura GraphQL Engine](../assets/demo.gif)
+![Demo Hasura GraphQL Engine](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -41,6 +41,7 @@ Baca lebih lanjut di [hasura.io](https://hasura.io) dan [dokumentasinya](https:/
 ## Daftar isi
 <!-- markdown-toc **start** - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 **Daftar isi**
+
 - [Mulai dengan cepat:](#mulai-dengan-cepat)
   - [Jalankan dengan satu klik di Heroku](#jalankan-dengan-satu-klik-di-heroku)
   - [Pilihan menjalankan aplikasi dengan satu klik lainnya](#pilihan-menjalankan-aplikasi-dengan-satu-klik-lainnya)
@@ -77,7 +78,7 @@ Cara paling cepat untuk mencoba Hasura adalah menggunakan Heroku.
 
 3. Buat _query_ GraphQL pertama Anda
 
-    Buat sebuah tabel dan langsung jalankan _query_ pertama Anda. Ikuti [petunjuk sederhana ini](https://hasura.io/docs/1.0/graphql/manual/getting-started/first-graphql-query.html).
+    Buat sebuah tabel dan langsung jalankan _query_ pertama Anda. Ikuti [petunjuk sederhana ini](https://hasura.io/docs/latest/graphql/core/getting-started/first-graphql-query.html).
 
 ### Pilihan menjalankan aplikasi dengan satu klik lainnya
 
@@ -85,12 +86,12 @@ Coba lihat pilihan lainnya untuk menjalankan aplikasi dengan satu klik:
 
 | **Penyedia infrastruktur** | **Tautan satu klik** | **Informasi tambahan** |
 |:------------------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:-------------------------------------------------------------------------------------------------------------------------------------------------:|
-| DigitalOcean | [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [dokumentasi](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
-| Azure | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [dokumentasi](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/azure-container-instances-postgres.html) |
+| DigitalOcean | [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [dokumentasi](https://hasura.io/docs/latest/graphql/core/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
+| Azure | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [dokumentasi](https://hasura.io/docs/latest/graphql/core/guides/deployment/azure-container-instances-postgres.html) |
 
 ### Metode menjalankan lainnya
 
-Untuk menjalankan berbasis Docker dan konfigurasi lebih lanjut, coba lihat [petunjuk menjalankan](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) atau
+Untuk menjalankan berbasis Docker dan konfigurasi lebih lanjut, coba lihat [petunjuk menjalankan](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) atau
 [manifestasi instalasi](../install-manifests).
 
 ## Arsitektur
@@ -119,28 +120,28 @@ Tambahkan logika bisnis asinkron yang dipicu oleh _event_ basis data. Ideal untu
 
 ### Data turunan atau transformasi data
 
-Transformasi data di Postgres atau jalankan logika bisnis untuk menghasilkan set data turunan lainnya yang dapat di-_query_ menggunakan GraphQL Engine -  [baca lebih lanjut](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+Transformasi data di Postgres atau jalankan logika bisnis untuk menghasilkan set data turunan lainnya yang dapat di-_query_ menggunakan GraphQL Engine -  [baca lebih lanjut](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## Demo
 
-Coba lihat seluruh contoh aplikasi pada direktori [_community/sample-apps_](../community/sample-apps).
+Coba lihat seluruh contoh aplikasi pada direktori [_hasura/sample-apps_](https://github.com/hasura/sample-apps/tree/main).
 
 ### Aplikasi _realtime_
 
 - Aplikasi _chat_ untuk grup yang dibuat menggunakan React. Termasuk indikator pengetikan, pengguna _online_ & notifikasi pesan baru.
-  - [Coba aplikasinya](https://realtime-chat.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-chat)
-  - [Lihat-lihat API](https://realtime-chat.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-chat.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Lihat-lihat API](https://realtime-chat.demo.hasura.io/console)
 
 - Aplikasi pelacak yang menyiarkan lokasi secara langsung dengan memperlihatkan kendaraan berjalan dengan posisi koordinat GPS yang berubah-ubah pada peta.
-  - [Coba aplikasinya](https://realtime-location-tracking.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-location-tracking)
-  - [Lihat-lihat API](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-location-tracking.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Lihat-lihat API](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Sebuah dasbor _realtime_ untuk meng-agregasi data yang berubah secara terus menerus.
-  - [Coba aplikasinya](https://realtime-poll.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-poll)
-  - [Lihat-lihat API](https://realtime-poll.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-poll.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Lihat-lihat API](https://realtime-poll.demo.hasura.io/console)
 
 ### Video
 
@@ -172,19 +173,19 @@ Coba lihat [petunjuk berkontribusi](../CONTRIBUTING.md) kami untuk detail lebih 
 Aset merek Hasura (logo, maskot, lencana _powered by_, dll.) dapat ditemukan di direktori [_assets/brand_](../assets/brand). Jangan ragu untuk menggunakannya pada aplikasi/website Anda. Kami akan sangat senang jika Anda menambahkan lencana "_Powered by Hasura_" di aplikasi yang dibangun menggunakan Hasura. ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- Untuk dasar berwarna terang -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- Untuk dasar berwarna gelap -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

@@ -1,0 +1,120 @@
+---
+description: Downgrade Hasura GraphQL Engine version
+keywords:
+  - hasura
+  - docs
+  - deployment
+  - downgrade
+  - version
+sidebar_position: 120
+sidebar_label: Downgrade GraphQL Engine
+---
+
+# Downgrade Hasura GraphQL Engine
+
+## Step 1: Update Hasura GraphQL Engine image version
+
+The Hasura GraphQL Engine runs off a Docker image and downgrades are as
+simple as changing the image tag to the version you want.
+
+Based on your deployment method, follow the appropriate guide to
+downgrade the GraphQL Engine version you're running:
+
+- [Updating on Docker](/deployment/deployment-guides/docker.mdx#docker-update)
+- [Updating on Kubernetes](/deployment/deployment-guides/kubernetes.mdx#kubernetes-update)
+
+If the GraphQL Engine version you are downgrading to has a different
+catalog version than your current, you will have to downgrade the
+catalog to the corresponding version manually as described below.
+
+## Step 2: Downgrade Hasura catalog version
+
+The Hasura GraphQL Engine maintains its Metadata state in a "catalog"
+as described [here](/migrations-metadata-seeds/metadata-format.mdx). The schema of the
+catalog is versioned. Updates to the Hasura GraphQL Engine may have
+Hasura catalog version bumps.
+
+Downgrades to the catalog need to be carried out manually in case you
+are attempting to downgrade to a lower Hasura GraphQL Engine version.
+
+From `v1.2.0`, you can downgrade the catalog from a particular version
+to a previous version by executing the `graphql-engine` executable on
+the command line, with the `downgrade` command, specifying the desired
+catalog version using one of the `--to-` flags. For earlier versions,
+it is recommended to first upgrade to the latest version and then use
+the `downgrade` command to downgrade to the desired version.
+
+The `downgrade` command is not part of the Hasura CLI but rather a
+command on `graphql-engine` itself. The way to execute this command is
+to run:
+
+```bash
+docker run -e HASURA_METADATA_DATABASE_URL=$DATABASE_URL hasura/graphql-engine:<VERSION> graphql-engine downgrade --to-<NEW-VERSION>
+```
+
+You need to use a newer version of `graphql-engine` to downgrade to an
+older version, since only the newer version knows how to downgrade from
+that point in time. After you’ve executed the `downgrade` command using
+the newer version, you should switch to the older version and run
+`graphql-engine serve` as normal.
+
+Catalogue version downgrades will be executed sequentially and in a
+single transaction.
+
+:::info Note
+
+Running this command while Hasura GraphQL Engine is running might lead
+to unexpected results. It is recommended to first bring down any running
+Hasura GraphQL Engine instances before downgrading the catalog
+
+:::
+
+:::info Note
+
+You can downgrade a Hasura GraphQL Engine v2 instance to v1 only if
+there is only one database connected to it.
+
+:::
+
+:::tip Issues with downgrading the catalog version?
+
+Please note that downgrading the Hasura catalog version is unavailable from  `v2.12.1` onward. We apologize for the inconvenience 
+and are working to restore this feature as soon as possible. In the meantime, should you need to execute the migration manually, 
+you can utilize the following SQL on your Metadata database:
+
+```sql
+ALTER TABLE hdb_catalog.hdb_version
+  DROP COLUMN ee_client_id,
+  DROP COLUMN ee_client_secret;
+INSERT INTO hdb_catalog.hdb_version (version, upgraded_on) VALUES (47, NOW())
+    ON CONFLICT ((version IS NOT NULL))
+    DO UPDATE SET version = EXCLUDED.version;
+```
+This will downgrade your Hasura instance from catalog version 48 to version 47, which was introduced in `v2.0.7`.
+
+
+:::
+
+## PostgreSQL source catalog version 5
+
+The PostgreSQL source catalog is versioned separately from the Metadata catalog,
+in `hdb_catalog.hdb_source_catalog_version` in each connected source database.
+Source catalog version 5 sets `REPLICA IDENTITY FULL` on this singleton version
+table so that initialization and upgrades work when an UPDATE publication
+includes the table. The `graphql-engine downgrade` command does not downgrade
+source catalogs.
+
+Before switching back to an engine that supports only source catalog version 4,
+stop all GraphQL Engine instances using the affected sources and run the
+following SQL on **each source database** that has source catalog version 5:
+
+```sql
+UPDATE hdb_catalog.hdb_source_catalog_version
+SET version = '4', upgraded_on = NOW()
+WHERE version = '5';
+```
+
+Keep `REPLICA IDENTITY FULL` in place: it is compatible with the version 4 schema
+and lets the older engine update the version row under an UPDATE publication.
+An older engine will still be unable to initialize a fresh source catalog under
+such a publication on affected PostgreSQL versions.

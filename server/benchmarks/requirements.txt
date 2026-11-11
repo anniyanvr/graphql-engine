@@ -1,0 +1,4 @@
+boto3==1.43.51
+botocore==1.43.51
+fabric==3.2.3
+paramiko==5.0.0

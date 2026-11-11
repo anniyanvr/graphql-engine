@@ -1,150 +1,153 @@
 module Hasura.GraphQL.Explain
-  ( explainGQLQuery
-  , GQLExplain
-  ) where
+  ( explainGQLQuery,
+    GQLExplain,
+  )
+where
 
-import           Hasura.Prelude
+import Control.Monad.Trans.Control (MonadBaseControl)
+import Data.Aeson qualified as J
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Authentication.Session (SessionVariables)
+import Hasura.Authentication.User (UserAdminSecret (..), UserInfo, UserRoleBuild (..), mkUserInfo)
+import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
+import Hasura.Base.Error
+import Hasura.CredentialCache
+import Hasura.EncJSON
+import Hasura.GraphQL.Context qualified as C
+import Hasura.GraphQL.Execute qualified as E
+import Hasura.GraphQL.Execute.Action qualified as E
+import Hasura.GraphQL.Execute.Backend
+import Hasura.GraphQL.Execute.Instances ()
+import Hasura.GraphQL.Execute.Query qualified as E
+import Hasura.GraphQL.Execute.RemoteJoin.Collect qualified as RJ
+import Hasura.GraphQL.Execute.Resolve qualified as ER
+import Hasura.GraphQL.Namespace (RootFieldAlias)
+import Hasura.GraphQL.ParameterizedQueryHash
+import Hasura.GraphQL.Transport.Backend
+import Hasura.GraphQL.Transport.HTTP.Protocol (_grOperationName, _unOperationName)
+import Hasura.GraphQL.Transport.HTTP.Protocol qualified as GH
+import Hasura.GraphQL.Transport.Instances ()
+import Hasura.Metadata.Class
+import Hasura.Prelude
+import Hasura.QueryTags
+import Hasura.RQL.IR
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.RQL.Types.SchemaCache
+import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.Server.Init.Config (ResponseInternalErrorsConfig)
+import Hasura.Tracing (MonadTrace)
+import Language.GraphQL.Draft.Syntax qualified as G
+import Network.HTTP.Types qualified as HTTP
 
-import qualified Data.Aeson                                  as J
-import qualified Data.Aeson.Casing                           as J
-import qualified Data.Aeson.TH                               as J
-import qualified Data.HashMap.Strict                         as Map
-import qualified Data.HashMap.Strict.InsOrd                  as OMap
-import qualified Database.PG.Query                           as Q
-import qualified Language.GraphQL.Draft.Syntax               as G
+data GQLExplain = GQLExplain
+  { _gqeQuery :: GH.GQLReqParsed,
+    _gqeUser :: Maybe SessionVariables,
+    _gqeIsRelay :: Maybe Bool
+  }
+  deriving (Show, Eq, Generic)
 
-import           Data.Text.Extended
+instance J.FromJSON GQLExplain where
+  parseJSON = J.genericParseJSON hasuraJSON {J.omitNothingFields = True}
 
-import qualified Hasura.Backends.Postgres.Execute.RemoteJoin as RR
-import qualified Hasura.Backends.Postgres.SQL.DML            as S
-import qualified Hasura.Backends.Postgres.Translate.Select   as DS
-import qualified Hasura.GraphQL.Execute                      as E
-import qualified Hasura.GraphQL.Execute.Inline               as E
-import qualified Hasura.GraphQL.Execute.LiveQuery            as E
-import qualified Hasura.GraphQL.Execute.Query                as E
-import qualified Hasura.GraphQL.Transport.HTTP.Protocol      as GH
-import qualified Hasura.RQL.IR.Select                        as DS
-
-import           Hasura.Backends.Postgres.SQL.Types
-import           Hasura.Backends.Postgres.SQL.Value
-import           Hasura.EncJSON
-import           Hasura.GraphQL.Context
-import           Hasura.GraphQL.Parser
-import           Hasura.RQL.DML.Internal
-import           Hasura.RQL.Types
-import           Hasura.Session
-
-
-data GQLExplain
-  = GQLExplain
-  { _gqeQuery   :: !GH.GQLReqParsed
-  , _gqeUser    :: !(Maybe (Map.HashMap Text Text))
-  , _gqeIsRelay :: !(Maybe Bool)
-  } deriving (Show, Eq)
-
-$(J.deriveJSON (J.aesonDrop 4 J.snakeCase){J.omitNothingFields=True}
-  ''GQLExplain
- )
-
-data FieldPlan
-  = FieldPlan
-  { _fpField :: !G.Name
-  , _fpSql   :: !(Maybe Text)
-  , _fpPlan  :: !(Maybe [Text])
-  } deriving (Show, Eq)
-
-$(J.deriveJSON (J.aesonDrop 3 J.camelCase) ''FieldPlan)
-
-resolveUnpreparedValue
-  :: (MonadError QErr m)
-  => UserInfo -> UnpreparedValue 'Postgres -> m S.SQLExp
-resolveUnpreparedValue userInfo = \case
-  UVParameter pgValue _ -> pure $ toTxtValue $ cvValue pgValue
-  UVLiteral sqlExp      -> pure sqlExp
-  UVSession             -> pure $ sessionInfoJsonExp $ _uiSession userInfo
-  UVSessionVar ty sessionVariable -> do
-    let maybeSessionVariableValue =
-          getSessionVariableValue sessionVariable (_uiSession userInfo)
-
-    sessionVariableValue <- fmap S.SELit $ onNothing maybeSessionVariableValue $
-      throw400 UnexpectedPayload $ "missing required session variable for role "
-      <> _uiRole userInfo <<> " : " <> sessionVariableToText sessionVariable
-
-    pure $ flip S.SETyAnn (S.mkTypeAnn ty) $ case ty of
-      PGTypeScalar colTy -> withConstructorFn colTy sessionVariableValue
-      PGTypeArray _      -> sessionVariableValue
+instance J.ToJSON GQLExplain where
+  toJSON = J.genericToJSON hasuraJSON {J.omitNothingFields = True}
+  toEncoding = J.genericToEncoding hasuraJSON {J.omitNothingFields = True}
 
 -- NOTE: This function has a 'MonadTrace' constraint in master, but we don't need it
 -- here. We should evaluate if we need it here.
-explainQueryField
-  :: (MonadError QErr m, MonadTx m)
-  => UserInfo
-  -> G.Name
-  -> QueryRootField (UnpreparedValue 'Postgres)
-  -> m FieldPlan
-explainQueryField userInfo fieldName rootField = do
-  resolvedRootField <- E.traverseQueryRootField (resolveUnpreparedValue userInfo) rootField
-  case resolvedRootField of
-    RFRemote _ -> throw400 InvalidParams "only hasura queries can be explained"
+explainQueryField ::
+  forall m.
+  ( MonadError QErr m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadTrace m
+  ) =>
+  Maybe (CredentialCache AgentLicenseKey) ->
+  UserInfo ->
+  [HTTP.Header] ->
+  Maybe G.Name ->
+  RootFieldAlias ->
+  QueryRootField UnpreparedValue ->
+  m EncJSON
+explainQueryField agentLicenseKey userInfo reqHeaders operationName fieldName rootField = do
+  case rootField of
+    RFRemote _ _ -> throw400 InvalidParams "only hasura queries can be explained"
     RFAction _ -> throw400 InvalidParams "query actions cannot be explained"
-    RFRaw _    -> pure $ FieldPlan fieldName Nothing Nothing
-    RFDB qDB   -> do
-      let (querySQL, remoteJoins) = case qDB of
-            QDBSimple s      -> first (DS.selectQuerySQL DS.JASMultipleRows) $ RR.getRemoteJoins s
-            QDBPrimaryKey s  -> first (DS.selectQuerySQL DS.JASSingleObject) $ RR.getRemoteJoins s
-            QDBAggregation s -> first DS.selectAggregateQuerySQL $ RR.getRemoteJoinsAggregateSelect s
-            QDBConnection s  -> first DS.connectionSelectQuerySQL $ RR.getRemoteJoinsConnectionSelect s
-          textSQL = Q.getQueryText querySQL
-          -- CAREFUL!: an `EXPLAIN ANALYZE` here would actually *execute* this
-          -- query, maybe resulting in privilege escalation:
-          withExplain = "EXPLAIN (FORMAT TEXT) " <> textSQL
-      -- Reject if query contains any remote joins
-      when (remoteJoins /= mempty) $ throw400 NotSupported "Remote relationships are not allowed in explain query"
-      planLines <- liftTx $ map runIdentity <$>
-                   Q.listQE dmlTxErrorHandler (Q.fromText withExplain) () True
-      pure $ FieldPlan fieldName (Just textSQL) $ Just planLines
+    RFRaw _ -> pure $ encJFromJValue $ ExplainPlan fieldName Nothing Nothing
+    RFMulti _ -> pure $ encJFromJValue $ ExplainPlan fieldName Nothing Nothing
+    RFDB sourceName exists -> do
+      step <- AB.dispatchAnyBackend @BackendExecute
+        exists
+        \(SourceConfigWith sourceConfig _ (QDBR db)) -> do
+          let (newDB, remoteJoins) = RJ.getRemoteJoinsQueryDB db
+          unless (isNothing remoteJoins)
+            $ throw400 InvalidParams "queries with remote relationships cannot be explained"
+          mkDBQueryExplain fieldName userInfo sourceName sourceConfig newDB reqHeaders operationName
+      AB.dispatchAnyBackend @BackendTransport step (runDBQueryExplain agentLicenseKey)
 
--- NOTE: This function has a 'MonadTrace' constraint in master, but we don't need it
--- here. We should evaluate if we need it here.
-explainGQLQuery
-  :: forall m
-  . ( MonadError QErr m
-    , MonadIO m
-    )
-  => PGExecCtx
-  -> SchemaCache
-  -> GQLExplain
-  -> m EncJSON
-explainGQLQuery pgExecCtx sc (GQLExplain query userVarsRaw maybeIsRelay) = do
+explainGQLQuery ::
+  forall m.
+  ( MonadError QErr m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadMetadataStorage m,
+    MonadQueryTags m,
+    MonadTrace m
+  ) =>
+  Options.RemoveEmptySubscriptionResponses ->
+  Options.BackwardsCompatibleNullInNonNullableVariables ->
+  Options.NoNullUnboundVariableDefault ->
+  SchemaCache ->
+  Maybe (CredentialCache AgentLicenseKey) ->
+  [HTTP.Header] ->
+  GQLExplain ->
+  ResponseInternalErrorsConfig ->
+  m EncJSON
+explainGQLQuery removeEmptySubscriptionResponses nullInNonNullableVariables noNullUnboundVariableDefault sc agentLicenseKey reqHeaders (GQLExplain query sessionVariables maybeIsRelay) responseErrorsConfig = do
   -- NOTE!: we will be executing what follows as though admin role. See e.g. notes in explainField:
-  userInfo <- mkUserInfo (URBFromSessionVariablesFallback adminRoleName) UAdminSecretSent sessionVariables
+  userInfo <-
+    mkUserInfo
+      (URBFromSessionVariablesFallback adminRoleName)
+      UAdminSecretSent
+      (fromMaybe mempty sessionVariables)
   -- we don't need to check in allow list as we consider it an admin endpoint
-  let takeFragment =
-        \case G.ExecutableDefinitionFragment f -> Just f; _ -> Nothing
-      fragments = mapMaybe takeFragment $ GH.unGQLExecDoc $ GH._grQuery query
-  (graphQLContext, queryParts) <- E.getExecPlanPartial userInfo sc queryType query
+  let graphQLContext = E.makeGQLContext userInfo sc queryType
+  queryParts <- GH.getSingleOperation query
   case queryParts of
-    G.TypedOperationDefinition G.OperationTypeQuery _ varDefs _ selSet -> do
-      -- (Here the above fragment inlining is actually executed.)
-      inlinedSelSet <- E.inlineSelectionSet fragments selSet
-      (unpreparedQueries, _) <-
-        E.parseGraphQLQuery graphQLContext varDefs (GH._grVariables query) inlinedSelSet
-      runInTx $ encJFromJValue
-        <$> for (OMap.toList unpreparedQueries) (uncurry (explainQueryField userInfo))
-
+    G.TypedOperationDefinition G.OperationTypeQuery _ varDefs directives inlinedSelSet -> do
+      (unpreparedQueries, _, _) <-
+        E.parseGraphQLQuery nullInNonNullableVariables noNullUnboundVariableDefault graphQLContext varDefs (GH._grVariables query) directives inlinedSelSet
+      -- TODO: validate directives here
+      encJFromList
+        <$> for (InsOrdHashMap.toList unpreparedQueries) (uncurry (explainQueryField agentLicenseKey userInfo reqHeaders (_unOperationName <$> _grOperationName query)))
     G.TypedOperationDefinition G.OperationTypeMutation _ _ _ _ ->
       throw400 InvalidParams "only queries can be explained"
-
-    G.TypedOperationDefinition G.OperationTypeSubscription _ varDefs _ selSet -> do
-      -- (Here the above fragment inlining is actually executed.)
-      inlinedSelSet <- E.inlineSelectionSet fragments selSet
-      (unpreparedQueries, _) <- E.parseGraphQLQuery graphQLContext varDefs (GH._grVariables query) inlinedSelSet
-      validSubscriptionQueries <- for unpreparedQueries E.validateSubscriptionRootField
-      (plan, _) <- E.buildLiveQueryPlan pgExecCtx userInfo validSubscriptionQueries
-      runInTx $ encJFromJValue <$> E.explainLiveQueryPlan plan
+    G.TypedOperationDefinition G.OperationTypeSubscription _ varDefs directives inlinedSelSet -> do
+      (_normalizedDirectives, normalizedSelectionSet) <-
+        ER.resolveVariables
+          nullInNonNullableVariables
+          noNullUnboundVariableDefault
+          varDefs
+          (fromMaybe mempty (GH._grVariables query))
+          directives
+          inlinedSelSet
+      subscriptionParser <- C.gqlSubscriptionParser graphQLContext `onNothing` throw400 NotFound "no subscriptions found"
+      unpreparedQueries <- liftEither $ subscriptionParser normalizedSelectionSet
+      let parameterizedQueryHash = calculateParameterizedQueryHash normalizedSelectionSet
+      -- TODO: validate directives here
+      -- query-tags are not necessary for EXPLAIN API
+      -- RequestContext are not necessary for EXPLAIN API
+      ((validSubscription, _), _) <- E.buildSubscriptionPlan removeEmptySubscriptionResponses userInfo unpreparedQueries parameterizedQueryHash reqHeaders (_unOperationName <$> _grOperationName query) responseErrorsConfig
+      case validSubscription of
+        E.SEAsyncActionsWithNoRelationships _ -> throw400 NotSupported "async action query fields without relationships to table cannot be explained"
+        E.SEOnSourceDB (E.SSLivequery actionIds liveQueryBuilder) -> do
+          actionLogResponseMap <- fst <$> E.fetchActionLogResponses actionIds
+          (_, E.SubscriptionQueryPlan exists) <- liftEitherM $ liftIO $ runExceptT $ fst <$> liveQueryBuilder actionLogResponseMap
+          AB.dispatchAnyBackend @BackendExecute exists \(E.MultiplexedSubscriptionQueryPlan execPlan) ->
+            encJFromJValue <$> mkSubscriptionExplain execPlan
+        E.SEOnSourceDB (E.SSStreaming _ ((_, E.SubscriptionQueryPlan exists), _modelInfo)) -> do
+          AB.dispatchAnyBackend @BackendExecute exists \(E.MultiplexedSubscriptionQueryPlan execPlan) ->
+            encJFromJValue <$> mkSubscriptionExplain execPlan
   where
     queryType = bool E.QueryHasura E.QueryRelay $ Just True == maybeIsRelay
-    sessionVariables = mkSessionVariablesText $ maybe [] Map.toList userVarsRaw
-
-    runInTx :: LazyTx QErr EncJSON -> m EncJSON
-    runInTx = liftEither <=< liftIO . runExceptT . runLazyTx pgExecCtx Q.ReadOnly

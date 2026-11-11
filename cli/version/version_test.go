@@ -4,17 +4,7 @@ import (
 	"testing"
 )
 
-func TestNew(t *testing.T) {
-	v := New()
-	if v == nil {
-		t.Fatal("expected a version object, got nil")
-	}
-	if v.CLI != BuildVersion {
-		t.Fatalf("expected %s, got %s", BuildVersion, v.CLI)
-	}
-}
-
-func TestNewCLIVersion(t *testing.T) {
+func TestNewCLIVersionWithSemver(t *testing.T) {
 	v := NewCLIVersion("v1.0.0")
 	if v == nil {
 		t.Fatal("expected a version object, got nil")
@@ -24,18 +14,29 @@ func TestNewCLIVersion(t *testing.T) {
 	}
 }
 
+func TestNewCLIVersionWithDev(t *testing.T) {
+	v := NewCLIVersion("dev")
+	if v == nil {
+		t.Fatal("expected a version object, got nil")
+	}
+	if v.CLI != "dev" {
+		t.Fatalf("expected %s, got %s", "dev", v.CLI)
+	}
+}
+
 func TestSetVersions(t *testing.T) {
-	var one int64 = 1
-	var zero int64 = 0
+	one := new(uint64(1))
+	zero := new(uint64(0))
+
 	tt := []struct {
 		name  string
 		in    string
 		out   string
-		major *int64
-		minor *int64
+		major *uint64
+		minor *uint64
 	}{
-		{"valid semver without v", "1.0.1-alpha01", "v1.0.1-alpha01", &one, &zero},
-		{"valid semver with v", "v1.0.1-alpha01", "v1.0.1-alpha01", &one, &zero},
+		{"valid semver without v", "1.0.1-alpha01", "v1.0.1-alpha01", one, zero},
+		{"valid semver with v", "v1.0.1-alpha01", "v1.0.1-alpha01", one, zero},
 		{"invalid semver", "dev", "dev", nil, nil},
 		{"invalid semver", "build-system-1234abc", "build-system-1234abc", nil, nil},
 	}

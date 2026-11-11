@@ -1,0 +1,31 @@
+/**
+ *  Define scss variables here.
+ *
+ *  Available options for Bootstrap:
+ *  http://getbootstrap.com/customize/
+ *
+ */
+
+@use 'sass:color';
+
+// Custom Colors
+$cyan: #33e0ff;
+$humility: #777;
+
+// Bootstrap Variables
+$brand-primary: color.adjust(#428bca, $lightness: -6.5%);
+$btn-primary-bg: #fec53d;
+$btn-primary-color: #606060;
+$brand-secondary: #e25139;
+$brand-success: #5cb85c;
+$brand-warning: #f0ad4e;
+$brand-danger: #d9534f;
+$brand-info: #5bc0de;
+
+$text-color: #333;
+
+$font-size-base: 14px;
+$font-family-sans-serif: 'Helvetica Neue', Helvetica, sans-serif;
+
+$table-bg-hover: #ebf7de !default;
+$table-bg-active: $table-bg-hover !default;

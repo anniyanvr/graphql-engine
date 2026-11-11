@@ -1,0 +1,48 @@
+{
+  "name": "nx-unplugin-dynamic-asset-loader",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/nx/unplugin-dynamic-asset-loader/src",
+  "projectType": "library",
+  "tags": ["scope:shared", "type:feature", "meta:package"],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:swc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/libs/nx/unplugin-dynamic-asset-loader",
+        "main": "libs/nx/unplugin-dynamic-asset-loader/src/index.ts",
+        "tsConfig": "libs/nx/unplugin-dynamic-asset-loader/tsconfig.lib.json",
+        "assets": ["libs/nx/unplugin-dynamic-asset-loader/*.md"],
+        "buildableProjectDepsInPackageJsonType": "dependencies"
+      }
+    },
+    "publish": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        {
+          "target": "build"
+        }
+      ],
+      "options": {
+        "command": "node tools/scripts/publish.mjs nx-unplugin-dynamic-asset-loader {args.ver} {args.tag}"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": [
+          "libs/nx/unplugin-dynamic-asset-loader/**/*.ts",
+          "libs/nx/unplugin-dynamic-asset-loader/**/*.json"
+        ]
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "coverage/libs/nx/unplugin-dynamic-asset-loader"
+      }
+    }
+  }
+}

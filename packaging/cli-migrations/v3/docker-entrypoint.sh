@@ -1,0 +1,125 @@
+#!/bin/sh
+
+set -e
+
+log() {
+    TIMESTAMP=$(date -u "+%Y-%m-%dT%H:%M:%S.000+0000")
+    LOGKIND=$1
+    MESSAGE=$2
+    echo "{\"timestamp\":\"$TIMESTAMP\",\"level\":\"info\",\"type\":\"startup\",\"detail\":{\"kind\":\"$LOGKIND\",\"info\":\"$MESSAGE\"}}"
+}
+
+DEFAULT_MIGRATIONS_DIR="/hasura-migrations"
+DEFAULT_METADATA_DIR="/hasura-metadata"
+TEMP_PROJECT_DIR="/tmp/hasura-project"
+
+if [ -z ${HGE_BINARY+x} ]; then
+    log "migrations-startup" "validation failed: expected HGE_BINARY environment variable to be set"
+    exit 1
+fi
+
+# Use 9691 port for running temporary instance. 
+# In case 9691 is occupied (according to docker networking), then this will fail.
+# override with another port in that case
+# TODO: Find a proper random port
+if [ -z ${HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT+x} ]; then
+    log "migrations-startup" "migrations server port env var is not set, defaulting to 9691"
+    HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT=9691
+fi
+
+if [ -z ${HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT+x} ]; then
+    log "migrations-startup" "server timeout is not set, defaulting to 30 seconds"
+    HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT=30
+fi
+
+# wait for a port to be ready
+wait_for_port() {
+    local PORT=$1
+    log "migrations-startup" "waiting $HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT for $PORT to be ready"
+    for _ in $(seq 1 $HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT);
+    do
+        nc -z localhost "$PORT" > /dev/null 2>&1 && log "migrations-startup" "port $PORT is ready" && return
+        sleep 1
+    done
+    log "migrations-startup" "failed waiting for $PORT, try increasing HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT (default: 30)" && exit 1
+}
+
+log "migrations-startup" "starting graphql engine temporarily on port $HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT"
+
+# start graphql engine with metadata api enabled. Disable event processing so
+# the temporary server does not poll for / deliver event triggers, cron
+# triggers, scheduled events or async actions while we apply migrations and
+# metadata — this avoids competing with the migration workload for database
+# resources and avoids sending events during migration. Unlike
+# HASURA_GRAPHQL_DISABLE_EVENTING this keeps the eventing subsystem otherwise
+# intact, so source catalog migrations still create the eventing catalog tables
+# (required when applying metadata that defines event triggers on a fresh db).
+HASURA_GRAPHQL_DISABLE_EVENT_PROCESSING=true $HGE_BINARY serve --enabled-apis="metadata" \
+               --server-port=${HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT}  &
+# store the pid to kill it later
+PID=$!
+
+# wait for port to be ready
+wait_for_port $HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT
+
+# check if migration directory is set, default otherwise
+if [ -z ${HASURA_GRAPHQL_MIGRATIONS_DIR+x} ]; then
+    log "migrations-startup" "env var HASURA_GRAPHQL_MIGRATIONS_DIR is not set, defaulting to $DEFAULT_MIGRATIONS_DIR"
+    HASURA_GRAPHQL_MIGRATIONS_DIR="$DEFAULT_MIGRATIONS_DIR"
+fi
+
+# check if metadata directory is set, default otherwise
+if [ -z ${HASURA_GRAPHQL_METADATA_DIR+x} ]; then
+    log "migrations-startup" "env var HASURA_GRAPHQL_METADATA_DIR is not set, defaulting to $DEFAULT_METADATA_DIR"
+    HASURA_GRAPHQL_METADATA_DIR="$DEFAULT_METADATA_DIR"
+fi
+
+# By default, metadata allows inconsistent metadata.
+# Set HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA=true to prevent
+# persisting metadata that references non-existent database objects.
+METADATA_APPLY_FLAGS=""
+if [ -n "${HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA+x}" ]; then
+    DISALLOW_INCONSISTENT_METADATA=$(echo "$HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA" | tr '[:upper:]' '[:lower:]')
+    if [ "$DISALLOW_INCONSISTENT_METADATA" = "true" ]; then
+        log "migrations-apply" "HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA is set, metadata apply will disallow inconsistent metadata"
+        METADATA_APPLY_FLAGS="--disallow-inconsistent-metadata"
+    fi
+fi
+
+# apply metadata if the directory exist
+if [ -d "$HASURA_GRAPHQL_METADATA_DIR" ]; then
+    rm -rf "$TEMP_PROJECT_DIR"
+    log "migrations-apply" "applying metadata from $HASURA_GRAPHQL_METADATA_DIR"
+    mkdir -p "$TEMP_PROJECT_DIR"
+    cp -a "$HASURA_GRAPHQL_METADATA_DIR/." "$TEMP_PROJECT_DIR/metadata/"
+    cd "$TEMP_PROJECT_DIR"
+    echo "version: 3" > config.yaml
+    echo "endpoint: http://localhost:$HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT" >> config.yaml
+    echo "metadata_directory: metadata" >> config.yaml
+    hasura-cli metadata apply $METADATA_APPLY_FLAGS
+else
+    log "migrations-apply" "directory $HASURA_GRAPHQL_METADATA_DIR does not exist, skipping metadata"
+fi
+
+# apply migrations if the directory exist
+if [ -d "$HASURA_GRAPHQL_MIGRATIONS_DIR" ]; then
+    log "migrations-apply" "applying migrations from $HASURA_GRAPHQL_MIGRATIONS_DIR"
+    mkdir -p "$TEMP_PROJECT_DIR"
+    cp -a "$HASURA_GRAPHQL_MIGRATIONS_DIR/." "$TEMP_PROJECT_DIR/migrations/"
+    cd "$TEMP_PROJECT_DIR"
+    echo "version: 3" > config.yaml
+    echo "endpoint: http://localhost:$HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT" >> config.yaml
+    hasura-cli migrate apply --all-databases
+    log "migrations-apply" "reloading metadata"
+    hasura-cli metadata reload
+else
+    log "migrations-apply" "directory $HASURA_GRAPHQL_MIGRATIONS_DIR does not exist, skipping migrations"
+fi
+
+# kill graphql engine that we started earlier
+log "migrations-shutdown" "killing temporary server"
+kill $PID
+
+# pass control to CMD
+log "migrations-shutdown" "graphql-engine will now start in normal mode"
+exec "$@"

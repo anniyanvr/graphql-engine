@@ -1,0 +1,43 @@
+import { Tabs } from '../Tabs';
+
+interface RemoteSchemaDetailsNavigationProps {
+  remoteSchemaName: string;
+}
+export const RemoteSchemaDetailsNavigation = (
+  props: RemoteSchemaDetailsNavigationProps,
+) => {
+  const { remoteSchemaName } = props;
+
+  const breadCrumbs = [
+    {
+      title: 'Remote schemas',
+      url: '/remote-schemas',
+    },
+    {
+      title: 'Manage',
+      url: `/remote-schemas/manage`,
+    },
+  ];
+
+  if (remoteSchemaName) {
+    breadCrumbs.push({
+      title: remoteSchemaName.trim(),
+      url: `/remote-schemas/manage/${encodeURIComponent(
+        remoteSchemaName.trim(),
+      )}/details`,
+    });
+    breadCrumbs.push({
+      title: 'details',
+      url: '',
+    });
+  }
+
+  return (
+    <Tabs
+      currentTab="details"
+      heading={remoteSchemaName}
+      breadCrumbs={breadCrumbs}
+      baseUrl={`/remote-schemas/manage/${encodeURIComponent(remoteSchemaName)}`}
+    />
+  );
+};

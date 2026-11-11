@@ -16,7 +16,7 @@ Hasura는 Postgres를 지원하는 GraphQL 앱을 만들거나 Postgres를 사�
 
 ------------------
 
-![Hasura GraphQL Engine 데모](../assets/demo.gif)
+![Hasura GraphQL Engine 데모](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -123,25 +123,25 @@ Postrgres에서 데이터를 변환하거나 GraphQL Engine 에 쿼리를 요청
 
 ## 데모
 
-모든 예시 어플리케이션 보고싶으시다면 [community/sample-apps](../community/sample-apps) 디렉토리에서 확인하세요.
+모든 예시 어플리케이션 보고싶으시다면 [hasura/sample-apps](https://github.com/hasura/sample-apps/tree/main) 디렉토리에서 확인하세요.
 
 
 ### 리얼타임_어플리케이션
 
 - React 기반으로 만든 그룹챗 어플리케이션, typing indicator를 포함한, 온라인 유저 & 메세지 수신 알람
-  - [Try it out](https://realtime-chat.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-chat)
-  - [Browse APIs](https://realtime-chat.demo.hasura.app/console)
+  - [Try it out](https://realtime-chat.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Browse APIs](https://realtime-chat.demo.hasura.io/console)
 
 - 달리는 차량 에서 현재 GPS 위치를 지도에 실시간으로 보여주는 위치 트래킹 앱
-  - [Try it out](https://realtime-location-tracking.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-location-tracking)
-  - [Browse APIs](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Try it out](https://realtime-location-tracking.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Browse APIs](https://realtime-location-tracking.demo.hasura.io/console)
 
 - 지속적으로 변화되는 데이터를 집계하는 리얼타임 대시보드
-  - [Try it out](https://realtime-poll.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-poll)
-  - [Browse APIs](https://realtime-poll.demo.hasura.app/console)
+  - [Try it out](https://realtime-poll.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Browse APIs](https://realtime-poll.demo.hasura.io/console)
 
 ### 영상
 
@@ -176,19 +176,19 @@ Hasura 브랜드 자산 (로고, 하수라 마스코트, 뱃지 등등.) 은 [�
 만약 Hasura로 만든 어플리케이션에 "Powered by Hasura" 배지를 넣어주신다면 저희는 더 감격스러울것 같아요 ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- For light backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- For dark backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

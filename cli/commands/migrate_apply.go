@@ -1,12 +1,19 @@
 package commands
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
-	"github.com/hasura/graphql-engine/cli"
-	migrate "github.com/hasura/graphql-engine/cli/migrate"
-	"github.com/pkg/errors"
+	"github.com/hasura/graphql-engine/cli/v2"
+	herrors "github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/hasura/graphql-engine/cli/v2/internal/hasura"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
+	migrate "github.com/hasura/graphql-engine/cli/v2/migrate"
+	"github.com/hasura/graphql-engine/cli/v2/util"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +24,11 @@ func newMigrateApplyCmd(ec *cli.ExecutionContext) *cobra.Command {
 	migrateApplyCmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Apply migrations on the database",
+		Long: `Migrations represent the modifications needed to reach the desired state of a database schema. Running this command will apply the migrations on the database.
+
+Further reading:
+- https://hasura.io/docs/latest/migrations-metadata-seeds/manage-migrations/
+`,
 		Example: `  # Apply all migrations
   hasura migrate apply
 
@@ -27,7 +39,13 @@ func newMigrateApplyCmd(ec *cli.ExecutionContext) *cobra.Command {
   hasura migrate apply --endpoint "<endpoint>"
 
   # Mark migration as applied on the server and skip execution:
-  hasura migrate apply --skip-execution
+  hasura migrate apply --skip-execution --version "<version>"
+
+  # Mark migrations as applied on the server and skip execution:
+  hasura migrate apply --skip-execution --up all
+
+  # Mark migrations as rollbacked on the server and skip execution:
+  hasura migrate apply --skip-execution --down all
 
   # Apply a particular migration version only:
   hasura migrate apply --version "<version>"
@@ -54,53 +72,90 @@ func newMigrateApplyCmd(ec *cli.ExecutionContext) *cobra.Command {
   hasura migrate apply --down all`,
 		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			err := ec.Prepare()
+			op := genOpName(cmd, "PreRunE")
+
+			err := validateConfigV3FlagsWithAll(cmd, ec)
 			if err != nil {
-				return err
+				return herrors.E(op, err)
 			}
-			return ec.Validate()
+
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if opts.dryRun && opts.SkipExecution {
-				return errors.New("both --skip-execution and --dry-run flags cannot be used together")
-			}
-			if !opts.dryRun {
-				opts.EC.Spin("Applying migrations...")
-			}
+			op := genOpName(cmd, "RunE")
+			opts.NoTransaction = ec.Viper.GetBool("no_transaction")
+
+			opts.PerMigrationTransaction = ec.Viper.GetBool("per_migration_transaction")
+
 			err := opts.Run()
-			opts.EC.Spinner.Stop()
 			if err != nil {
-				if err == migrate.ErrNoChange {
-					opts.EC.Logger.Info("nothing to apply")
-					return nil
-				}
-				if e, ok := err.(*os.PathError); ok {
-					// If Op is first, then log No migrations to apply
-					if e.Op == "first" {
-						opts.EC.Logger.Info("nothing to apply")
-						return nil
-					}
-				}
-				return errors.Wrap(err, "apply failed")
+				return herrors.E(op, err)
 			}
-			if !opts.dryRun {
-				opts.EC.Logger.Info("migrations applied")
-			}
+
 			return nil
 		},
 	}
 	f := migrateApplyCmd.Flags()
 	f.SortFlags = false
 
-	f.StringVar(&opts.UpMigration, "up", "", "apply all or N up migration steps")
-	f.StringVar(&opts.DownMigration, "down", "", "apply all or N down migration steps")
-	f.StringVar(&opts.GotoVersion, "goto", "", "apply migration chain up to to the version specified")
+	f.StringVar(
+		&opts.UpMigration,
+		"up",
+		"",
+		"apply all or N up migration steps (use --version to apply a specific migration)",
+	)
+	f.StringVar(
+		&opts.DownMigration,
+		"down",
+		"",
+		"apply all or N down migration steps (use --version --type down to roll back a specific migration)",
+	)
+	f.StringVar(&opts.GotoVersion, "goto", "", "apply migration chain up to the version specified")
 
 	f.StringVar(&opts.VersionMigration, "version", "", "only apply this particular migration")
-	f.BoolVar(&opts.SkipExecution, "skip-execution", false, "skip executing the migration action, but mark them as applied")
-	f.StringVar(&opts.MigrationType, "type", "up", "type of migration (up, down) to be used with version flag")
+	f.BoolVar(
+		&opts.SkipExecution,
+		"skip-execution",
+		false,
+		"skip executing the migration action, but mark them as applied",
+	)
+	f.StringVar(
+		&opts.MigrationType,
+		"type",
+		"up",
+		"type of migration (up, down) to be used with version flag",
+	)
 
-	f.BoolVar(&opts.dryRun, "dry-run", false, "print the names of migrations which are going to be applied")
+	f.BoolVar(
+		&opts.DryRun,
+		"dry-run",
+		false,
+		"print the names of migrations which are going to be applied",
+	)
+	f.BoolVar(
+		&opts.EC.AllDatabases,
+		"all-databases",
+		false,
+		"set this flag to attempt to apply migrations on all databases present on server",
+	)
+	f.BoolVar(&opts.ProgressBarLogs, "progressbar-logs", false, "print the logs of progressbar")
+
+	err := f.MarkHidden("progressbar-logs")
+	if err != nil {
+		ec.Logger.WithError(err).Errorf("error while using a dependency library")
+	}
+
+	f.BoolVar(&opts.NoTransaction, "no-transaction", false, "disable transaction for migration")
+	f.BoolVar(
+		&opts.PerMigrationTransaction,
+		"per-migration-transaction",
+		false,
+		"enable per-migration transaction control; add '-- hasura:no-transaction' as the first line of a SQL file to run that migration without a transaction (not supported on MSSQL/BigQuery sources)",
+	)
+
+	util.BindPFlag(ec.Viper, "no_transaction", f.Lookup("no-transaction"))
+	util.BindPFlag(ec.Viper, "per_migration_transaction", f.Lookup("per-migration-transaction"))
+
 	return migrateApplyCmd
 }
 
@@ -112,50 +167,352 @@ type MigrateApplyOptions struct {
 	VersionMigration string
 	MigrationType    string
 	// version up to which migration chain has to be applied
-	GotoVersion   string
-	SkipExecution bool
-	dryRun        bool
+	GotoVersion     string
+	SkipExecution   bool
+	DryRun          bool
+	Source          cli.Source
+	ProgressBarLogs bool
+
+	NoTransaction           bool
+	PerMigrationTransaction bool
+}
+
+func (o *MigrateApplyOptions) Validate() error {
+	var op herrors.Op = "commands.MigrateApplyOptions.Validate"
+
+	if o.EC.Config.Version == cli.V2 {
+		o.Source.Kind = hasura.SourceKindPG
+		o.Source.Name = ""
+	}
+
+	if o.NoTransaction && o.PerMigrationTransaction {
+		return herrors.E(
+			op,
+			"--no-transaction and --per-migration-transaction are mutually exclusive",
+		)
+	}
+
+	if o.DryRun && o.SkipExecution {
+		return herrors.E(op, "both --skip-execution and --dry-run flags cannot be used together")
+	}
+
+	if o.DryRun && o.EC.AllDatabases {
+		return herrors.E(op, "both --all-databases and --dry-run flags cannot be used together")
+	}
+
+	if o.EC.Config.Version >= cli.V3 {
+		if !o.EC.AllDatabases && len(o.Source.Name) == 0 {
+			return herrors.E(
+				op,
+				"unable to determine database on which migration should be applied",
+			)
+		}
+
+		if !o.EC.AllDatabases {
+			if len(o.Source.Name) == 0 {
+				return herrors.E(op, "empty database name")
+			}
+
+			if len(o.Source.Kind) == 0 {
+				// find out the database kind by making a API call to server
+				// and update ec to include the database name and kind
+				sourceKind, err := metadatautil.GetSourceKind(
+					o.EC.APIClient.V1Metadata.ExportMetadata,
+					o.Source.Name,
+				)
+				if err != nil {
+					return herrors.E(
+						op,
+						fmt.Errorf("determining database kind of '%s': %w", o.Source.Name, err),
+					)
+				}
+
+				if sourceKind == nil {
+					return herrors.E(
+						op,
+						fmt.Errorf(
+							"error determining database kind for '%s', check if database exists on hasura",
+							o.Source.Name,
+						),
+					)
+				}
+
+				o.Source.Kind = *sourceKind
+			}
+		}
+	}
+
+	return nil
+}
+
+type errDatabaseMigrationDirectoryNotFound struct {
+	message string
+}
+
+func (e *errDatabaseMigrationDirectoryNotFound) Error() string {
+	return e.message
 }
 
 func (o *MigrateApplyOptions) Run() error {
-	migrationType, step, err := getMigrationTypeAndStep(o.UpMigration, o.DownMigration, o.VersionMigration, o.MigrationType, o.GotoVersion, o.SkipExecution)
+	var op herrors.Op = "commands.MigrateApplyOptions.Run"
+
+	results, err := o.Apply()
 	if err != nil {
-		return errors.Wrap(err, "error validating flags")
+		return herrors.E(op, err)
 	}
 
-	migrateDrv, err := migrate.NewMigrate(o.EC, true)
-	if err != nil {
-		return err
-	}
-	migrateDrv.SkipExecution = o.SkipExecution
-	migrateDrv.DryRun = o.dryRun
+	var failedSources []string
 
-	return ExecuteMigration(migrationType, migrateDrv, step)
+	for result := range results {
+		if result.Error != nil {
+			failedSources = append(failedSources, result.DatabaseName)
+			o.EC.Logger.Errorf("%v", result.Error)
+		} else if len(result.Message) > 0 {
+			o.EC.Logger.Infof("%s", result.Message)
+		}
+	}
+
+	if len(failedSources) != 0 {
+		return herrors.E(
+			op,
+			fmt.Errorf(
+				"applying migrations failed on database(s): %s",
+				strings.Join(failedSources, ","),
+			),
+		)
+	}
+
+	return nil
 }
 
+type MigrateApplyResult struct {
+	DatabaseName string
+	Message      string
+	Error        error
+}
+
+func (o *MigrateApplyOptions) Apply() (chan MigrateApplyResult, error) {
+	var op herrors.Op = "commands.MigrateApplyOptions.Apply"
+
+	resultChan := make(chan MigrateApplyResult)
+
+	if len(o.Source.Name) == 0 && !o.EC.AllDatabases {
+		o.Source = o.EC.Source
+	}
+
+	err := o.Validate()
+	if err != nil {
+		return nil, herrors.E(op, err)
+	}
+
+	if o.EC.AllDatabases && o.EC.Config.Version >= cli.V3 {
+		o.EC.Spin("getting lists of databases from server ")
+		sourcesAndKind, err := metadatautil.GetSourcesAndKind(
+			o.EC.APIClient.V1Metadata.ExportMetadata,
+		)
+		o.EC.Spinner.Stop()
+
+		if err != nil {
+			return nil, herrors.E(op, err)
+		}
+
+		go func() {
+			defer close(resultChan)
+
+			for _, source := range sourcesAndKind {
+				result := MigrateApplyResult{
+					DatabaseName: source.Name,
+					Message:      "",
+					Error:        nil,
+				}
+				o.Source.Kind = source.Kind
+				o.Source.Name = source.Name
+
+				err := o.Exec()
+				if err != nil {
+					result.Message, result.Error = o.handleApplyError(err)
+				} else {
+					result.Message = "migrations applied on database: " + o.Source.Name
+				}
+
+				resultChan <- result
+			}
+		}()
+	} else {
+		go func() {
+			defer close(resultChan)
+
+			result := MigrateApplyResult{
+				DatabaseName: o.Source.Name,
+				Message:      "",
+				Error:        nil,
+			}
+
+			err := o.Exec()
+			if err != nil {
+				result.Message, result.Error = o.handleApplyError(err)
+			} else {
+				result.Message = "migrations applied"
+			}
+
+			resultChan <- result
+		}()
+	}
+
+	return resultChan, nil
+}
+
+// handleApplyError turns the error from applying migrations on a database into
+// the message and error reported for that database.
+func (o *MigrateApplyOptions) handleApplyError(err error) (string, error) {
+	var op herrors.Op = "commands.MigrateApplyOptions.handleApplyError"
+
+	if err == nil {
+		return "", nil
+	}
+
+	var (
+		errPath     *os.PathError
+		errNotFound *errDatabaseMigrationDirectoryNotFound
+	)
+
+	switch {
+	case errors.Is(err, migrate.ErrNoChange):
+		return "nothing to apply on database: " + o.Source.Name, nil
+	case errors.As(err, &errPath):
+		// If Op is first, then log No migrations to apply
+		if errPath.Op == "first" {
+			return "nothing to apply on database: " + o.Source.Name, nil
+		}
+	case errors.As(err, &errNotFound):
+		// check if the returned error is a directory not found error
+		// ie might be because  a migrations/<source_name> directory is not found
+		// if so skip this
+		if o.EC.AllDatabases {
+			// a database with no migrations directory has nothing to apply,
+			// it should not fail the run for every other database
+			return fmt.Sprintf(
+				"skipping applying migrations on database '%s': %s",
+				o.Source.Name,
+				errNotFound.Error(),
+			), nil
+		}
+
+		return "", herrors.E(
+			op,
+			fmt.Errorf(
+				"skipping applying migrations on database '%s', encountered: \n%s",
+				o.Source.Name,
+				errNotFound.Error(),
+			),
+		)
+	}
+
+	return "", herrors.E(
+		op,
+		fmt.Errorf(
+			"skipping applying migrations on database '%s', encountered: \n%w",
+			o.Source.Name,
+			err,
+		),
+	)
+}
+
+func (o *MigrateApplyOptions) Exec() error {
+	var op herrors.Op = "commands.MigrateApplyOptions.Exec"
+
+	if o.EC.Config.Version >= cli.V3 {
+		// check if  a migrations directory exists for source in project
+		migrationDirectory := filepath.Join(o.EC.MigrationDir, o.Source.Name)
+		if f, err := os.Stat(migrationDirectory); err != nil || f == nil {
+			return herrors.E(
+				op,
+				&errDatabaseMigrationDirectoryNotFound{
+					fmt.Sprintf(
+						"expected to find a migrations directory for database '%s' in %s, but encountered error: %s",
+						o.Source.Name,
+						o.EC.MigrationDir,
+						err.Error(),
+					),
+				},
+			)
+		}
+	}
+
+	if o.EC.AllDatabases && (len(o.GotoVersion) > 0 || len(o.VersionMigration) > 0) {
+		return herrors.E(op, "cannot use --goto or --version in conjunction with --all-databases")
+	}
+
+	migrationType, step, err := getMigrationTypeAndStep(
+		o.UpMigration,
+		o.DownMigration,
+		o.VersionMigration,
+		o.MigrationType,
+		o.GotoVersion,
+		o.SkipExecution,
+	)
+	if err != nil {
+		return herrors.E(op, fmt.Errorf("error validating flags: %w", err))
+	}
+
+	migrateDrv, err := migrate.NewMigrate(o.EC, true, o.Source.Name, o.Source.Kind)
+	if err != nil {
+		return herrors.E(op, err)
+	}
+
+	migrateDrv.SkipExecution = o.SkipExecution
+	migrateDrv.DryRun = o.DryRun
+	migrateDrv.ProgressBarLogs = o.ProgressBarLogs
+	migrateDrv.NoTransaction = o.NoTransaction
+	migrateDrv.PerMigrationTransaction = o.PerMigrationTransaction
+
+	if err := ExecuteMigration(migrationType, migrateDrv, step); err != nil {
+		return herrors.E(op, err)
+	}
+
+	return nil
+}
+
+// minMistakenVersionStep is the smallest --up/--down value treated as a mistaken
+// migration version. Versions are timestamps, so they are far larger than any
+// real number of migrations.
+const minMistakenVersionStep = 1_000_000_000
+
 // Only one flag out of up, down and version can be set at a time. This function
-// checks whether that is the case and returns an error is not
-func getMigrationTypeAndStep(upMigration, downMigration, versionMigration, migrationType, gotoVersion string, skipExecution bool) (string, int64, error) {
-	var flagCount = 0
-	var stepString = "all"
-	var migrationName = "up"
+// checks whether that is the case and returns an error is not.
+func getMigrationTypeAndStep(
+	upMigration, downMigration, versionMigration, migrationType, gotoVersion string,
+	skipExecution bool,
+) (string, int64, error) {
+	var (
+		op            herrors.Op = "commands.getMigrationTypeAndStep"
+		flagCount                = 0
+		stepString               = "all"
+		migrationName            = "up"
+	)
+
 	if upMigration != "" {
 		stepString = upMigration
 		flagCount++
 	}
+
 	if downMigration != "" {
 		migrationName = "down"
 		stepString = downMigration
 		flagCount++
 	}
+
 	if versionMigration != "" {
 		migrationName = "version"
+
 		stepString = versionMigration
 		if migrationType == "down" {
 			stepString = "-" + stepString
 		}
+
 		flagCount++
 	}
+
 	if gotoVersion != "" {
 		migrationName = "gotoVersion"
 		stepString = gotoVersion
@@ -163,11 +520,19 @@ func getMigrationTypeAndStep(upMigration, downMigration, versionMigration, migra
 	}
 
 	if flagCount > 1 {
-		return "", 0, errors.New("only one migration type can be applied at a time (--up, --down or --goto)")
+		return "", 0, herrors.E(
+			op,
+			"only one migration type can be applied at a time (--up, --down, --type or --goto)",
+		)
 	}
 
-	if migrationName != "version" && skipExecution {
-		return "", 0, errors.New("--skip-execution flag can be set only with --version flag")
+	skipExecutionValid := migrationName == "version" || migrationName == "up" ||
+		migrationName == "down"
+	if !skipExecutionValid && skipExecution {
+		return "", 0, herrors.E(
+			op,
+			"--skip-execution flag can be set only with --version, --up, --down flags",
+		)
 	}
 
 	if stepString == "all" && migrationName != "version" {
@@ -176,7 +541,24 @@ func getMigrationTypeAndStep(upMigration, downMigration, versionMigration, migra
 
 	step, err := strconv.ParseInt(stepString, 10, 64)
 	if err != nil {
-		return "", 0, errors.Wrap(err, "not a valid input for steps/version")
+		return "", 0, herrors.E(op, fmt.Errorf("not a valid input for steps/version: %w", err))
 	}
+
+	// --up and --down take a number of migrations to apply. A count this large
+	// is almost certainly a migration version passed to the wrong flag, and
+	// running it would apply (or roll back) every migration there is.
+	if (migrationName == "up" || migrationName == "down") && step >= minMistakenVersionStep {
+		return "", 0, herrors.E(
+			op,
+			fmt.Errorf(
+				"--%s expects a number of migrations, but %d looks like a migration version; to apply a single version use --version %d --type %s",
+				migrationName,
+				step,
+				step,
+				migrationName,
+			),
+		)
+	}
+
 	return migrationName, step, nil
 }

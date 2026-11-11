@@ -1,6 +1,6 @@
 # https://github.com/hasura/graphql-engine/issues/5020
 description: Query author connection with edges
-url: /v1beta1/relay
+url: /v1/relay
 status: 200
 query:
   query: |
@@ -37,7 +37,7 @@ query:
     }
 response:
   errors:
-  - extensions:
-      path: $.selectionSet.author_connection.selectionSet.edges.selectionSet.node.selectionSet.articles_view_connection
-      code: validation-failed
-    message: "field \"articles_view_connection\" not found in type: 'author'"
+    - extensions:
+        path: $.selectionSet.author_connection.selectionSet.edges.selectionSet.node.selectionSet.articles_view_connection
+        code: validation-failed
+      message: "field 'articles_view_connection' not found in type: 'author'"

@@ -1,149 +1,530 @@
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
+
 -- | Types and classes related to configuration when the server is initialised
-module Hasura.Server.Init.Config where
+module Hasura.Server.Init.Config
+  ( -- * Option
+    Option (..),
+    optionPP,
 
-import qualified Data.Aeson                       as J
-import qualified Data.Aeson.Casing                as J
-import qualified Data.Aeson.TH                    as J
-import qualified Data.HashSet                     as Set
-import qualified Data.String                      as DataString
-import qualified Data.Text                        as T
-import qualified Database.PG.Query                as Q
+    -- * HGEOptionsRaw
+    HGEOptionsRaw (..),
+    horDatabaseUrl,
+    horMetadataDbUrl,
+    horCommand,
 
-import           Data.Char                        (toLower)
-import           Data.Time
-import           Network.Wai.Handler.Warp         (HostPreference)
-import qualified Network.WebSockets               as WS
+    -- * HGEOptions
+    HGEOptions (..),
+    hoCommand,
 
-import qualified Hasura.Cache.Bounded             as Cache
-import qualified Hasura.GraphQL.Execute.LiveQuery as LQ
-import qualified Hasura.GraphQL.Execute.Plan      as E
-import qualified Hasura.Logging                   as L
+    -- * PostgresConnInfo
+    PostgresConnInfo (..),
+    pciDatabaseConn,
+    pciRetries,
 
-import           Hasura.Prelude
-import           Hasura.Server.Auth
-import           Hasura.Server.Cors
-import           Hasura.Session
+    -- * PostgresRawConnInfo
+    PostgresConnInfoRaw (..),
+    _PGConnDatabaseUrl,
+    _PGConnDetails,
+    mkUrlConnInfo,
 
-data RawConnParams
-  = RawConnParams
-  { rcpStripes      :: !(Maybe Int)
-  , rcpConns        :: !(Maybe Int)
-  , rcpIdleTime     :: !(Maybe Int)
-  , rcpConnLifetime :: !(Maybe NominalDiffTime)
-  -- ^ Time from connection creation after which to destroy a connection and
-  -- choose a different/new one.
-  , rcpAllowPrepare :: !(Maybe Bool)
-  } deriving (Show, Eq)
+    -- * PostgresRawConnDetails
+    PostgresConnDetailsRaw (..),
 
-type RawAuthHook = AuthHookG (Maybe Text) (Maybe AuthHookType)
+    -- * HGECommand
+    HGECommand (..),
+    _HCServe,
 
-data RawServeOptions impl
-  = RawServeOptions
-  { rsoPort                 :: !(Maybe Int)
-  , rsoHost                 :: !(Maybe HostPreference)
-  , rsoConnParams           :: !RawConnParams
-  , rsoTxIso                :: !(Maybe Q.TxIsolation)
-  , rsoAdminSecret          :: !(Maybe AdminSecretHash)
-  , rsoAuthHook             :: !RawAuthHook
-  , rsoJwtSecret            :: !(Maybe JWTConfig)
-  , rsoUnAuthRole           :: !(Maybe RoleName)
-  , rsoCorsConfig           :: !(Maybe CorsConfig)
-  , rsoEnableConsole        :: !Bool
-  , rsoConsoleAssetsDir     :: !(Maybe Text)
-  , rsoEnableTelemetry      :: !(Maybe Bool)
-  , rsoWsReadCookie         :: !Bool
-  , rsoStringifyNum         :: !Bool
-  , rsoEnabledAPIs          :: !(Maybe [API])
-  , rsoMxRefetchInt         :: !(Maybe LQ.RefetchInterval)
-  , rsoMxBatchSize          :: !(Maybe LQ.BatchSize)
-  , rsoEnableAllowlist      :: !Bool
-  , rsoEnabledLogTypes      :: !(Maybe [L.EngineLogType impl])
-  , rsoLogLevel             :: !(Maybe L.LogLevel)
-  , rsoPlanCacheSize        :: !(Maybe Cache.CacheSize)
-  , rsoDevMode              :: !Bool
-  , rsoAdminInternalErrors  :: !(Maybe Bool)
-  , rsoEventsHttpPoolSize   :: !(Maybe Int)
-  , rsoEventsFetchInterval  :: !(Maybe Milliseconds)
-  , rsoLogHeadersFromEnv    :: !Bool
-  , rsoWebSocketCompression :: !Bool
-  , rsoWebSocketKeepAlive   :: !(Maybe Int)
+    -- * ServeOptionsRaw
+    ServeOptionsRaw (..),
+    ConsoleStatus (..),
+    isConsoleEnabled,
+    AdminInternalErrorsStatus (..),
+    isAdminInternalErrorsEnabled,
+    enabledWebSocketCompressionOptions,
+    isWebSocketCompressionEnabled,
+    AllowListStatus (..),
+    isAllowListEnabled,
+    DevModeStatus (..),
+    isDevModeEnabled,
+    RelayModeStatus (..),
+    isRelayEnabled,
+    TelemetryStatus (..),
+    isTelemetryEnabled,
+    WsReadCookieStatus (..),
+    isWsReadCookieEnabled,
+    Preserve401ErrorsStatus (..),
+    Port,
+    _getPort,
+    mkPort,
+    unsafePort,
+    API (..),
+    KeepAliveDelay (..),
+    OptionalInterval (..),
+    AuthHookRaw (..),
+    ConnParamsRaw (..),
+    ResponseInternalErrorsConfig (..),
+    WSConnectionInitTimeout (..),
+    msToOptionalInterval,
+    rawConnDetailsToUrl,
+    rawConnDetailsToUrlText,
+    shouldIncludeInternal,
+
+    -- * ServeOptions
+    ServeOptions (..),
+
+    -- * Downgrade Options
+    DowngradeOptions (..),
+    -- $experimentalFeatures
+    -- $readOnlyMode
+  )
+where
+
+--------------------------------------------------------------------------------
+
+import Control.Lens (Lens', Prism')
+import Control.Lens qualified as Lens
+import Data.Aeson (FromJSON, ToJSON, (.:), (.:?), (.=))
+import Data.Aeson qualified as J
+import Data.Scientific qualified as Scientific
+import Data.Text qualified as Text
+import Data.Time qualified as Time
+import Data.URL.Template qualified as Template
+import Database.PG.Query qualified as Query
+import Hasura.Authentication.Role (RoleName, adminRoleName)
+import Hasura.Backends.Postgres.Connection.MonadTx qualified as MonadTx
+import Hasura.Base.Error (IncludeInternalErrors (..))
+import Hasura.GraphQL.Execute.Subscription.Options qualified as Subscription.Options
+import Hasura.Logging qualified as Logging
+import Hasura.NativeQuery.Validation qualified as NativeQuery.Validation
+import Hasura.Prelude
+import Hasura.RQL.Types.Common qualified as Common
+import Hasura.RQL.Types.Metadata (MetadataDefaults)
+import Hasura.RQL.Types.NamingCase (NamingCase)
+import Hasura.RQL.Types.Schema.Options qualified as Schema.Options
+import Hasura.Server.Auth qualified as Auth
+import Hasura.Server.Cors qualified as Cors
+import Hasura.Server.Logging qualified as Server.Logging
+import Hasura.Server.Types qualified as Server.Types
+import Network.Wai.Handler.Warp qualified as Warp
+import Network.WebSockets qualified as WebSockets
+import Refined (NonNegative, Positive, Refined, unrefine)
+
+--------------------------------------------------------------------------------
+
+-- | The collected default value, env var, and help message for an
+-- option. If there should be no default value then use 'Option ()'.
+data Option def = Option
+  { _default :: def,
+    _envVar :: String,
+    _helpMessage :: String
+  }
+  deriving (Functor)
+
+-- | Helper function for pretty printing @Option a@.
+optionPP :: Option a -> (String, String)
+optionPP = _envVar &&& _helpMessage
+
+--------------------------------------------------------------------------------
+
+-- | Raw HGE Options from the arg parser and the env.
+data HGEOptionsRaw impl = HGEOptionsRaw
+  { _horDatabaseUrl :: PostgresConnInfo (Maybe PostgresConnInfoRaw),
+    _horMetadataDbUrl :: Maybe String,
+    _horCommand :: HGECommand impl
+  }
+  deriving stock (Show)
+
+horDatabaseUrl :: Lens' (HGEOptionsRaw impl) (PostgresConnInfo (Maybe PostgresConnInfoRaw))
+horDatabaseUrl = Lens.lens _horDatabaseUrl $ \hdu a -> hdu {_horDatabaseUrl = a}
+
+horMetadataDbUrl :: Lens' (HGEOptionsRaw impl) (Maybe String)
+horMetadataDbUrl = Lens.lens _horMetadataDbUrl $ \hdu a -> hdu {_horMetadataDbUrl = a}
+
+horCommand :: Lens' (HGEOptionsRaw impl) (HGECommand impl)
+horCommand = Lens.lens _horCommand $ \hdu a -> hdu {_horCommand = a}
+
+--------------------------------------------------------------------------------
+
+-- | The final processed HGE options.
+data HGEOptions impl = HGEOptions
+  { _hoDatabaseUrl :: PostgresConnInfo (Maybe Common.UrlConf),
+    _hoMetadataDbUrl :: Maybe String,
+    _hoCommand :: HGECommand impl
   }
 
--- | @'ResponseInternalErrorsConfig' represents the encoding of the internal
--- errors in the response to the client.
--- See the github comment https://github.com/hasura/graphql-engine/issues/4031#issuecomment-609747705 for more details.
-data ResponseInternalErrorsConfig
-  = InternalErrorsAllRequests
-  | InternalErrorsAdminOnly
-  | InternalErrorsDisabled
+hoCommand :: Lens' (HGEOptions impl) (HGECommand impl)
+hoCommand = Lens.lens _hoCommand $ \hdu a -> hdu {_hoCommand = a}
+
+--------------------------------------------------------------------------------
+
+-- | Postgres connection info tupled with a retry count.
+--
+-- In practice, the @a@ here is one of the following:
+-- 1. 'Maybe PostgresConnInfoRaw'
+-- 2. 'Maybe UrlConf'
+-- 3. 'Maybe Text'
+-- 4. 'Maybe DatabaseUrl' where 'DatabaseUrl' is an alias for 'Text'
+--
+-- If it contains a 'Maybe PostgresConnInfoRaw' then you have not yet
+-- processed your arg parser results.
+data PostgresConnInfo a = PostgresConnInfo
+  { _pciDatabaseConn :: a,
+    _pciRetries :: Maybe Int
+  }
+  deriving (Show, Eq, Functor, Foldable, Traversable)
+
+pciDatabaseConn :: Lens' (PostgresConnInfo a) a
+pciDatabaseConn = Lens.lens _pciDatabaseConn $ \pci a -> pci {_pciDatabaseConn = a}
+
+pciRetries :: Lens' (PostgresConnInfo a) (Maybe Int)
+pciRetries = Lens.lens _pciRetries $ \pci mi -> pci {_pciRetries = mi}
+
+--------------------------------------------------------------------------------
+
+-- | Postgres Connection info in the form of a templated URI string or
+-- structured data.
+data PostgresConnInfoRaw
+  = PGConnDatabaseUrl Template.Template
+  | PGConnDetails PostgresConnDetailsRaw
   deriving (Show, Eq)
 
-shouldIncludeInternal :: RoleName -> ResponseInternalErrorsConfig -> Bool
-shouldIncludeInternal role = \case
-  InternalErrorsAllRequests -> True
-  InternalErrorsAdminOnly   -> isAdmin role
-  InternalErrorsDisabled    -> False
+mkUrlConnInfo :: String -> PostgresConnInfoRaw
+mkUrlConnInfo = PGConnDatabaseUrl . Template.mkPlainTemplate . Text.pack
 
-newtype KeepAliveDelay
-  = KeepAliveDelay
-      { unKeepAliveDelay :: Seconds
-      } deriving (Eq, Show)
+_PGConnDatabaseUrl :: Prism' PostgresConnInfoRaw Template.Template
+_PGConnDatabaseUrl = Lens.prism' PGConnDatabaseUrl $ \case
+  PGConnDatabaseUrl template -> Just template
+  PGConnDetails _ -> Nothing
 
-data ServeOptions impl
-  = ServeOptions
-  { soPort                         :: !Int
-  , soHost                         :: !HostPreference
-  , soConnParams                   :: !Q.ConnParams
-  , soTxIso                        :: !Q.TxIsolation
-  , soAdminSecret                  :: !(Maybe AdminSecretHash)
-  , soAuthHook                     :: !(Maybe AuthHook)
-  , soJwtSecret                    :: !(Maybe JWTConfig)
-  , soUnAuthRole                   :: !(Maybe RoleName)
-  , soCorsConfig                   :: !CorsConfig
-  , soEnableConsole                :: !Bool
-  , soConsoleAssetsDir             :: !(Maybe Text)
-  , soEnableTelemetry              :: !Bool
-  , soStringifyNum                 :: !Bool
-  , soEnabledAPIs                  :: !(Set.HashSet API)
-  , soLiveQueryOpts                :: !LQ.LiveQueriesOptions
-  , soEnableAllowlist              :: !Bool
-  , soEnabledLogTypes              :: !(Set.HashSet (L.EngineLogType impl))
-  , soLogLevel                     :: !L.LogLevel
-  , soPlanCacheOptions             :: !E.PlanCacheOptions
-  , soResponseInternalErrorsConfig :: !ResponseInternalErrorsConfig
-  , soEventsHttpPoolSize           :: !(Maybe Int)
-  , soEventsFetchInterval          :: !(Maybe Milliseconds)
-  , soLogHeadersFromEnv            :: !Bool
-  , soConnectionOptions            :: !WS.ConnectionOptions
-  , soWebsocketKeepAlive           :: !KeepAliveDelay
+_PGConnDetails :: Prism' PostgresConnInfoRaw PostgresConnDetailsRaw
+_PGConnDetails = Lens.prism' PGConnDetails $ \case
+  PGConnDatabaseUrl _ -> Nothing
+  PGConnDetails prcd -> Just prcd
+
+rawConnDetailsToUrl :: PostgresConnDetailsRaw -> Template.Template
+rawConnDetailsToUrl =
+  Template.mkPlainTemplate . rawConnDetailsToUrlText
+
+--------------------------------------------------------------------------------
+
+-- | Structured Postgres connection information as provided by the arg
+-- parser or env vars.
+data PostgresConnDetailsRaw = PostgresConnDetailsRaw
+  { connHost :: String,
+    connPort :: Int,
+    connUser :: String,
+    connPassword :: String,
+    connDatabase :: String,
+    connOptions :: Maybe String
   }
+  deriving (Eq, Read, Show)
 
-data DowngradeOptions
-  = DowngradeOptions
-  { dgoTargetVersion :: !Text
-  , dgoDryRun        :: !Bool
-  } deriving (Show, Eq)
+instance FromJSON PostgresConnDetailsRaw where
+  parseJSON = J.withObject "PostgresConnDetailsRaw" \o -> do
+    connHost <- o .: "host"
+    connPort <- o .: "port"
+    connUser <- o .: "user"
+    connPassword <- o .: "password"
+    connDatabase <- o .: "database"
+    connOptions <- o .:? "options"
+    pure $ PostgresConnDetailsRaw {..}
 
-data RawConnInfo =
-  RawConnInfo
-  { connHost     :: !(Maybe String)
-  , connPort     :: !(Maybe Int)
-  , connUser     :: !(Maybe String)
-  , connPassword :: !String
-  , connUrl      :: !(Maybe String)
-  , connDatabase :: !(Maybe String)
-  , connOptions  :: !(Maybe String)
-  , connRetries  :: !(Maybe Int)
-  } deriving (Eq, Read, Show)
+instance ToJSON PostgresConnDetailsRaw where
+  toJSON PostgresConnDetailsRaw {..} =
+    J.object
+      $ [ "host" .= connHost,
+          "port" .= connPort,
+          "user" .= connUser,
+          "password" .= connPassword,
+          "database" .= connDatabase
+        ]
+      <> catMaybes [fmap ("options" .=) connOptions]
 
-data HGECommandG a
-  = HCServe !a
+rawConnDetailsToUrlText :: PostgresConnDetailsRaw -> Text
+rawConnDetailsToUrlText PostgresConnDetailsRaw {..} =
+  Text.pack
+    $ "postgresql://"
+    <> connUser
+    <> ":"
+    <> connPassword
+    <> "@"
+    <> connHost
+    <> ":"
+    <> show connPort
+    <> "/"
+    <> connDatabase
+    <> maybe "" ("?options=" <>) connOptions
+
+--------------------------------------------------------------------------------
+
+-- | The HGE Arg parser Command choices.
+--
+-- This is polymorphic so that we can pack either 'ServeOptionsRaw' or
+-- 'ProServeOptionsRaw' in it.
+data HGECommand a
+  = HCServe a
   | HCExport
   | HCClean
-  | HCExecute
   | HCVersion
   | HCDowngrade !DowngradeOptions
   deriving (Show, Eq)
+
+_HCServe :: Prism' (HGECommand a) a
+_HCServe = Lens.prism' HCServe \case
+  HCServe a -> Just a
+  _ -> Nothing
+
+--------------------------------------------------------------------------------
+
+-- | The Serve Command options accumulated from the Arg and Env parsers.
+--
+-- NOTE: A 'Nothing' value indicates the absence of a particular
+-- flag. Hence types such as 'Maybe (HashSet X)' or 'Maybe Bool'.
+data ServeOptionsRaw impl = ServeOptionsRaw
+  { rsoPort :: Maybe Port,
+    rsoHost :: Maybe Warp.HostPreference,
+    rsoConnParams :: ConnParamsRaw,
+    rsoTxIso :: Maybe Query.TxIsolation,
+    rsoAdminSecret :: Maybe Auth.AdminSecretHash,
+    rsoAuthHook :: AuthHookRaw,
+    rsoJwtSecret :: Maybe Auth.JWTConfig,
+    rsoUnAuthRole :: Maybe RoleName,
+    rsoCorsConfig :: Maybe Cors.CorsConfig,
+    rsoConsoleStatus :: ConsoleStatus,
+    rsoDisableAdminSecret :: Bool,
+    rsoConsoleAssetsDir :: Maybe Text,
+    rsoConsoleSentryDsn :: Maybe Text,
+    rsoEnableTelemetry :: Maybe TelemetryStatus,
+    rsoWsReadCookie :: WsReadCookieStatus,
+    rsoStringifyNum :: Schema.Options.StringifyNumbers,
+    rsoDangerousBooleanCollapse :: Maybe Schema.Options.DangerouslyCollapseBooleans,
+    rsoBackwardsCompatibleNullInNonNullableVariables :: Maybe Schema.Options.BackwardsCompatibleNullInNonNullableVariables,
+    rsoRemoteNullForwardingPolicy :: Maybe Schema.Options.RemoteNullForwardingPolicy,
+    rsoEnabledAPIs :: Maybe (HashSet API),
+    rsoMxRefetchInt :: Maybe Subscription.Options.RefetchInterval,
+    rsoMxBatchSize :: Maybe Subscription.Options.BatchSize,
+    -- We have different config options for livequery and streaming subscriptions
+    rsoStreamingMxRefetchInt :: Maybe Subscription.Options.RefetchInterval,
+    rsoStreamingMxBatchSize :: Maybe Subscription.Options.BatchSize,
+    rsoEnableAllowList :: AllowListStatus,
+    rsoEnabledLogTypes :: Maybe (HashSet (Logging.EngineLogType impl)),
+    rsoLogLevel :: Maybe Logging.LogLevel,
+    rsoDevMode :: DevModeStatus,
+    rsoAdminInternalErrors :: Maybe AdminInternalErrorsStatus,
+    rsoEventsHttpPoolSize :: Maybe (Refined Positive Int),
+    rsoEventsFetchInterval :: Maybe (Refined NonNegative Milliseconds),
+    rsoAsyncActionsFetchInterval :: Maybe OptionalInterval,
+    rsoEnableRemoteSchemaPermissions :: Schema.Options.RemoteSchemaPermissions,
+    rsoWebSocketCompression :: WebSockets.CompressionOptions,
+    rsoWebSocketKeepAlive :: Maybe KeepAliveDelay,
+    rsoInferFunctionPermissions :: Maybe Schema.Options.InferFunctionPermissions,
+    rsoEnableMaintenanceMode :: Server.Types.MaintenanceMode (),
+    rsoEventingMode :: Server.Types.EventingMode,
+    rsoEventProcessingMode :: Server.Types.EventProcessingMode,
+    rsoSchemaPollInterval :: Maybe OptionalInterval,
+    -- | See Note '$experimentalFeatures' at bottom of module
+    rsoExperimentalFeatures :: Maybe (HashSet Server.Types.ExperimentalFeature),
+    rsoEventsFetchBatchSize :: Maybe (Refined NonNegative Int),
+    rsoGracefulShutdownTimeout :: Maybe (Refined NonNegative Seconds),
+    rsoWebSocketConnectionInitTimeout :: Maybe WSConnectionInitTimeout,
+    rsoWebSocketQueueSize :: Maybe (Refined Positive Int),
+    rsoEnableMetadataQueryLoggingEnv :: Server.Logging.MetadataQueryLoggingMode,
+    rsoHttpLogQueryOnlyOnError :: Server.Logging.HttpLogQueryOnlyOnError,
+    -- | stores global default naming convention
+    rsoDefaultNamingConvention :: Maybe NamingCase,
+    rsoExtensionsSchema :: Maybe MonadTx.ExtensionsSchema,
+    rsoMetadataDefaults :: Maybe MetadataDefaults,
+    rsoApolloFederationStatus :: Maybe Server.Types.ApolloFederationStatus,
+    rsoCloseWebsocketsOnMetadataChangeStatus :: Maybe Server.Types.CloseWebsocketsOnMetadataChangeStatus,
+    rsoMaxTotalHeaderLength :: Maybe Int,
+    rsoTriggersErrorLogLevelStatus :: Maybe Server.Types.TriggersErrorLogLevelStatus,
+    rsoRedactEventTriggerLogs :: Maybe Server.Types.RedactEventTriggerLogsStatus,
+    rsoRedactScheduledTriggerLogs :: Maybe Server.Types.RedactScheduledTriggerLogsStatus,
+    rsoRedactActionHandlerLogs :: Maybe Server.Types.RedactActionHandlerLogsStatus,
+    rsoAsyncActionsFetchBatchSize :: Maybe Int,
+    rsoPersistedQueries :: Maybe Server.Types.PersistedQueriesState,
+    rsoPersistedQueriesTtl :: Maybe Int,
+    rsoRemoteSchemaResponsePriority :: Maybe Server.Types.RemoteSchemaResponsePriority,
+    rsoHeaderPrecedence :: Maybe Server.Types.HeaderPrecedence,
+    rsoTraceQueryStatus :: Maybe Server.Types.TraceQueryStatus,
+    rsoDisableNativeQueryValidation :: NativeQuery.Validation.DisableNativeQueryValidation,
+    rsoPreserve401Errors :: Preserve401ErrorsStatus,
+    rsoServerTimeout :: Maybe (Refined NonNegative Int),
+    rsoLogMaskedVariables :: Maybe (HashSet Text),
+    rsoRelayMode :: RelayModeStatus,
+    rsoRemoteSchemaHealingInterval :: Maybe OptionalInterval
+  }
+
+deriving stock instance (Show (Logging.EngineLogType impl)) => Show (ServeOptionsRaw impl)
+
+-- | Whether or not to serve Console assets.
+data ConsoleStatus = ConsoleEnabled | ConsoleDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData ConsoleStatus
+
+instance Hashable ConsoleStatus
+
+isConsoleEnabled :: ConsoleStatus -> Bool
+isConsoleEnabled = \case
+  ConsoleEnabled -> True
+  ConsoleDisabled -> False
+
+instance FromJSON ConsoleStatus where
+  parseJSON = fmap (bool ConsoleDisabled ConsoleEnabled) . J.parseJSON
+
+instance ToJSON ConsoleStatus where
+  toJSON = J.toJSON . isConsoleEnabled
+
+-- | Whether or not internal errors will be sent in response to admin.
+data AdminInternalErrorsStatus = AdminInternalErrorsEnabled | AdminInternalErrorsDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData AdminInternalErrorsStatus
+
+instance Hashable AdminInternalErrorsStatus
+
+isAdminInternalErrorsEnabled :: AdminInternalErrorsStatus -> Bool
+isAdminInternalErrorsEnabled = \case
+  AdminInternalErrorsEnabled -> True
+  AdminInternalErrorsDisabled -> False
+
+instance FromJSON AdminInternalErrorsStatus where
+  parseJSON = fmap (bool AdminInternalErrorsDisabled AdminInternalErrorsEnabled) . J.parseJSON
+
+instance ToJSON AdminInternalErrorsStatus where
+  toJSON = J.toJSON . isAdminInternalErrorsEnabled
+
+isWebSocketCompressionEnabled :: WebSockets.CompressionOptions -> Bool
+isWebSocketCompressionEnabled = \case
+  WebSockets.PermessageDeflateCompression _ -> True
+  WebSockets.NoCompression -> False
+
+enabledWebSocketCompressionOptions :: WebSockets.CompressionOptions
+enabledWebSocketCompressionOptions =
+  WebSockets.PermessageDeflateCompression
+    (WebSockets.defaultPermessageDeflate {WebSockets.pdCompressionLevel = 3})
+
+-- | A representation of whether or not to enable the GraphQL Query AllowList.
+--
+-- See: https://hasura.io/docs/latest/security/allow-list/#enable-allow-list
+data AllowListStatus = AllowListEnabled | AllowListDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData AllowListStatus
+
+instance Hashable AllowListStatus
+
+isAllowListEnabled :: AllowListStatus -> Bool
+isAllowListEnabled = \case
+  AllowListEnabled -> True
+  AllowListDisabled -> False
+
+instance FromJSON AllowListStatus where
+  parseJSON = fmap (bool AllowListDisabled AllowListEnabled) . J.parseJSON
+
+instance ToJSON AllowListStatus where
+  toJSON = J.toJSON . isAllowListEnabled
+
+-- | A representation of whether or not to enable Hasura Dev Mode.
+--
+-- See: https://hasura.io/docs/latest/deployment/graphql-engine-flags/config-examples/#dev-mode
+data DevModeStatus = DevModeEnabled | DevModeDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData DevModeStatus
+
+instance Hashable DevModeStatus
+
+isDevModeEnabled :: DevModeStatus -> Bool
+isDevModeEnabled = \case
+  DevModeEnabled -> True
+  DevModeDisabled -> False
+
+instance FromJSON DevModeStatus where
+  parseJSON = fmap (bool DevModeDisabled DevModeEnabled) . J.parseJSON
+
+instance ToJSON DevModeStatus where
+  toJSON = J.toJSON . isDevModeEnabled
+
+-- | Whether or not to enable the Relay API endpoints (@/v1/relay@, @/v1beta1/relay@).
+data RelayModeStatus = RelayModeEnabled | RelayModeDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData RelayModeStatus
+
+instance Hashable RelayModeStatus
+
+isRelayEnabled :: RelayModeStatus -> Bool
+isRelayEnabled = \case
+  RelayModeEnabled -> True
+  RelayModeDisabled -> False
+
+instance FromJSON RelayModeStatus where
+  parseJSON = fmap (bool RelayModeDisabled RelayModeEnabled) . J.parseJSON
+
+instance ToJSON RelayModeStatus where
+  toJSON = J.toJSON . isRelayEnabled
+
+-- | A representation of whether or not to enable telemetry that is isomorphic to 'Bool'.
+data TelemetryStatus = TelemetryEnabled | TelemetryDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance NFData TelemetryStatus
+
+instance Hashable TelemetryStatus
+
+isTelemetryEnabled :: TelemetryStatus -> Bool
+isTelemetryEnabled = \case
+  TelemetryEnabled -> True
+  TelemetryDisabled -> False
+
+instance FromJSON TelemetryStatus where
+  parseJSON = fmap (bool TelemetryDisabled TelemetryEnabled) . J.parseJSON
+
+instance ToJSON TelemetryStatus where
+  toJSON = J.toJSON . isTelemetryEnabled
+
+-- | A representation of whether or not to read the websocket cookie
+-- on initial handshake that is isomorphic to 'Bool'. See
+-- 'wsReadCookieOption' for more details.
+data WsReadCookieStatus = WsReadCookieEnabled | WsReadCookieDisabled
+  deriving stock (Show, Eq, Generic)
+
+instance NFData WsReadCookieStatus
+
+instance Hashable WsReadCookieStatus
+
+isWsReadCookieEnabled :: WsReadCookieStatus -> Bool
+isWsReadCookieEnabled = \case
+  WsReadCookieEnabled -> True
+  WsReadCookieDisabled -> False
+
+instance FromJSON WsReadCookieStatus where
+  parseJSON = fmap (bool WsReadCookieDisabled WsReadCookieEnabled) . J.parseJSON
+
+instance ToJSON WsReadCookieStatus where
+  toJSON = J.toJSON . isWsReadCookieEnabled
+
+-- | An 'Int' representing a Port number in the range 0 to 65536.
+newtype Port = Port {_getPort :: Int}
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving newtype (ToJSON, NFData, Hashable)
+
+mkPort :: Int -> Maybe Port
+mkPort x = case x >= 0 && x < 65536 of
+  True -> Just $ Port x
+  False -> Nothing
+
+unsafePort :: Int -> Port
+unsafePort = Port
+
+instance FromJSON Port where
+  parseJSON = J.withScientific "Int" $ \t -> do
+    case t > 0 && t < 65536 of
+      True -> maybe (fail "integer passed is out of bounds") (pure . Port) $ Scientific.toBoundedInteger t
+      False -> fail "integer passed is out of bounds"
 
 data API
   = METADATA
@@ -151,147 +532,265 @@ data API
   | PGDUMP
   | DEVELOPER
   | CONFIG
+  | METRICS
   deriving (Show, Eq, Read, Generic)
 
-$(J.deriveJSON (J.defaultOptions { J.constructorTagModifier = map toLower })
-  ''API)
+instance FromJSON API where
+  parseJSON = J.withText "API" \case
+    "metadata" -> pure METADATA
+    "graphql" -> pure GRAPHQL
+    "pgdump" -> pure PGDUMP
+    "developer" -> pure DEVELOPER
+    "config" -> pure CONFIG
+    "metrics" -> pure METRICS
+    x -> fail $ "unexpected string '" <> show x <> "'."
+
+instance ToJSON API where
+  toJSON = \case
+    METADATA -> J.String "metadata"
+    GRAPHQL -> J.String "graphql"
+    PGDUMP -> J.String "pgdump"
+    DEVELOPER -> J.String "developer"
+    CONFIG -> J.String "config"
+    METRICS -> J.String "metrics"
 
 instance Hashable API
 
-$(J.deriveJSON (J.aesonDrop 4 J.camelCase){J.omitNothingFields=True} ''RawConnInfo)
+data AuthHookRaw = AuthHookRaw
+  { ahrUrl :: Maybe Text,
+    ahrType :: Maybe Auth.AuthHookType,
+    ahrSendRequestBody :: Maybe Bool
+  }
+  deriving stock (Show)
 
-type HGECommand impl = HGECommandG (ServeOptions impl)
-type RawHGECommand impl = HGECommandG (RawServeOptions impl)
+-- | Sleep time interval for recurring activities such as (@'asyncActionsProcessor')
+--   Presently 'msToOptionalInterval' interprets `0` as Skip.
+data OptionalInterval
+  = -- | No polling
+    Skip
+  | -- | Interval time
+    Interval (Refined NonNegative Milliseconds)
+  deriving (Show, Eq)
 
-data HGEOptionsG a
-  = HGEOptionsG
-  { hoConnInfo :: !RawConnInfo
-  , hoCommand  :: !(HGECommandG a)
-  } deriving (Show, Eq)
+msToOptionalInterval :: Refined NonNegative Milliseconds -> OptionalInterval
+msToOptionalInterval = \case
+  (unrefine -> 0) -> Skip
+  s -> Interval s
 
-type RawHGEOptions impl = HGEOptionsG (RawServeOptions impl)
-type HGEOptions impl = HGEOptionsG (ServeOptions impl)
+instance FromJSON OptionalInterval where
+  parseJSON v = msToOptionalInterval <$> J.parseJSON v
 
-type Env = [(String, String)]
+instance ToJSON OptionalInterval where
+  toJSON = \case
+    Skip -> J.toJSON @Milliseconds 0
+    Interval s -> J.toJSON s
 
-readHookType :: String -> Either String AuthHookType
-readHookType tyS =
-  case tyS of
-    "GET"  -> Right AHTGet
-    "POST" -> Right AHTPost
-    _      -> Left "Only expecting GET / POST"
+-- | The Raw configuration data from the Arg and Env parsers needed to
+-- construct a 'ConnParams'
+data ConnParamsRaw = ConnParamsRaw
+  { -- NOTE: Should any of these types be 'PositiveInt'?
+    rcpStripes :: Maybe (Refined NonNegative Int),
+    rcpConns :: Maybe (Refined NonNegative Int),
+    rcpIdleTime :: Maybe (Refined NonNegative Int),
+    -- | Time from connection creation after which to destroy a connection and
+    -- choose a different/new one.
+    rcpConnLifetime :: Maybe (Refined NonNegative Time.NominalDiffTime),
+    rcpAllowPrepare :: Maybe Bool,
+    -- | See @HASURA_GRAPHQL_PG_POOL_TIMEOUT@
+    rcpPoolTimeout :: Maybe (Refined NonNegative Time.NominalDiffTime)
+  }
+  deriving (Show, Eq)
 
-parseStrAsBool :: String -> Either String Bool
-parseStrAsBool t
-  | map toLower t `elem` truthVals = Right True
-  | map toLower t `elem` falseVals = Right False
-  | otherwise = Left errMsg
-  where
-    truthVals = ["true", "t", "yes", "y"]
-    falseVals = ["false", "f", "no", "n"]
+newtype KeepAliveDelay = KeepAliveDelay {unKeepAliveDelay :: Refined NonNegative Seconds}
+  deriving (Eq, Show)
 
-    errMsg = " Not a valid boolean text. " ++ "True values are "
-             ++ show truthVals ++ " and  False values are " ++ show falseVals
-             ++ ". All values are case insensitive"
+instance FromJSON KeepAliveDelay where
+  parseJSON = J.withObject "KeepAliveDelay" \o -> do
+    unKeepAliveDelay <- o .: "keep_alive_delay"
+    pure $ KeepAliveDelay {..}
 
-readIsoLevel :: String -> Either String Q.TxIsolation
-readIsoLevel isoS =
-  case isoS of
-    "read-committed"  -> return Q.ReadCommitted
-    "repeatable-read" -> return Q.RepeatableRead
-    "serializable"    -> return Q.Serializable
-    _                 -> Left "Only expecting read-committed / repeatable-read / serializable"
+instance ToJSON KeepAliveDelay where
+  toJSON KeepAliveDelay {..} =
+    J.object ["keep_alive_delay" .= unKeepAliveDelay]
 
-readAPIs :: String -> Either String [API]
-readAPIs = mapM readAPI . T.splitOn "," . T.pack
-  where readAPI si = case T.toUpper $ T.strip si of
-          "METADATA"  -> Right METADATA
-          "GRAPHQL"   -> Right GRAPHQL
-          "PGDUMP"    -> Right PGDUMP
-          "DEVELOPER" -> Right DEVELOPER
-          "CONFIG"    -> Right CONFIG
-          _            -> Left "Only expecting list of comma separated API types metadata,graphql,pgdump,developer,config"
+--------------------------------------------------------------------------------
 
-readLogLevel :: String -> Either String L.LogLevel
-readLogLevel s = case T.toLower $ T.strip $ T.pack s of
-  "debug" -> Right L.LevelDebug
-  "info"  -> Right L.LevelInfo
-  "warn"  -> Right L.LevelWarn
-  "error" -> Right L.LevelError
-  _       -> Left "Valid log levels: debug, info, warn or error"
+-- | The timeout duration in 'Seconds' for a WebSocket connection.
+newtype WSConnectionInitTimeout = WSConnectionInitTimeout {unWSConnectionInitTimeout :: Refined NonNegative Seconds}
+  deriving newtype (Show, Eq, Ord)
 
-readJson :: (J.FromJSON a) => String -> Either String a
-readJson = J.eitherDecodeStrict . txtToBs . T.pack
+instance FromJSON WSConnectionInitTimeout where
+  parseJSON = J.withObject "WSConnectionInitTimeout" \o -> do
+    unWSConnectionInitTimeout <- o .: "w_s_connection_init_timeout"
+    pure $ WSConnectionInitTimeout {..}
 
-class FromEnv a where
-  fromEnv :: String -> Either String a
+instance ToJSON WSConnectionInitTimeout where
+  toJSON WSConnectionInitTimeout {..} =
+    J.object ["w_s_connection_init_timeout" .= unWSConnectionInitTimeout]
 
--- Deserialize from seconds, in the usual way
-instance FromEnv NominalDiffTime where
-  fromEnv s = maybe (Left "could not parse as a Double") (Right . realToFrac) $
-                (readMaybe s :: Maybe Double)
+--------------------------------------------------------------------------------
 
-instance FromEnv String where
-  fromEnv = Right
+-- | Status code preservation mode for 401 errors. See this draft spec:
+-- https://graphql.github.io/graphql-over-http/draft/#sel-FAHLFABABD3lV
+data Preserve401ErrorsStatus
+  = -- | Map all errors (including 401) to status 200 (default)
+    MapEverythingTo200
+  | -- | Preserve 401 status codes from webhooks/JWT auth
+    Preserve401Errors
+  deriving stock (Show, Eq, Generic)
 
-instance FromEnv HostPreference where
-  fromEnv = Right . DataString.fromString
+instance NFData Preserve401ErrorsStatus
 
-instance FromEnv Text where
-  fromEnv = Right . T.pack
+instance Hashable Preserve401ErrorsStatus
 
-instance FromEnv AuthHookType where
-  fromEnv = readHookType
+-- | The final Serve Command options accummulated from the Arg Parser
+-- and the Environment, fully processed and ready to apply when
+-- running the server.
+data ServeOptions impl = ServeOptions
+  { soPort :: Port,
+    soHost :: Warp.HostPreference,
+    soConnParams :: Query.ConnParams,
+    soTxIso :: Query.TxIsolation,
+    soAdminSecret :: HashSet Auth.AdminSecretHash,
+    soAuthHook :: Maybe Auth.AuthHook,
+    soJwtSecret :: [Auth.JWTConfig],
+    soUnAuthRole :: Maybe RoleName,
+    soCorsConfig :: Cors.CorsConfig,
+    soConsoleStatus :: ConsoleStatus,
+    soDisableAdminSecret :: Bool,
+    soConsoleAssetsDir :: Maybe Text,
+    soConsoleSentryDsn :: Maybe Text,
+    soEnableTelemetry :: TelemetryStatus,
+    soStringifyNum :: Schema.Options.StringifyNumbers,
+    soDangerousBooleanCollapse :: Schema.Options.DangerouslyCollapseBooleans,
+    soBackwardsCompatibleNullInNonNullableVariables :: Schema.Options.BackwardsCompatibleNullInNonNullableVariables,
+    soRemoteNullForwardingPolicy :: Schema.Options.RemoteNullForwardingPolicy,
+    soEnabledAPIs :: HashSet API,
+    soLiveQueryOpts :: Subscription.Options.LiveQueriesOptions,
+    soStreamingQueryOpts :: Subscription.Options.StreamQueriesOptions,
+    soEnableAllowList :: AllowListStatus,
+    soEnabledLogTypes :: HashSet (Logging.EngineLogType impl),
+    soLogLevel :: Logging.LogLevel,
+    soEventsHttpPoolSize :: Refined Positive Int,
+    soEventsFetchInterval :: Refined NonNegative Milliseconds,
+    soAsyncActionsFetchInterval :: OptionalInterval,
+    soEnableRemoteSchemaPermissions :: Schema.Options.RemoteSchemaPermissions,
+    soConnectionOptions :: WebSockets.ConnectionOptions,
+    soWebSocketKeepAlive :: KeepAliveDelay,
+    soInferFunctionPermissions :: Schema.Options.InferFunctionPermissions,
+    soEnableMaintenanceMode :: Server.Types.MaintenanceMode (),
+    soSchemaPollInterval :: OptionalInterval,
+    -- | See note '$experimentalFeatures'
+    soExperimentalFeatures :: HashSet Server.Types.ExperimentalFeature,
+    soEventsFetchBatchSize :: Refined NonNegative Int,
+    soDevMode :: DevModeStatus,
+    soAdminInternalErrors :: AdminInternalErrorsStatus,
+    soGracefulShutdownTimeout :: Refined NonNegative Seconds,
+    soWebSocketConnectionInitTimeout :: WSConnectionInitTimeout,
+    soWebSocketQueueSize :: Refined Positive Int,
+    soEventingMode :: Server.Types.EventingMode,
+    soEventProcessingMode :: Server.Types.EventProcessingMode,
+    -- | See note '$readOnlyMode'
+    soReadOnlyMode :: Server.Types.ReadOnlyMode,
+    soEnableMetadataQueryLogging :: Server.Logging.MetadataQueryLoggingMode,
+    soHttpLogQueryOnlyOnError :: Server.Logging.HttpLogQueryOnlyOnError,
+    soDefaultNamingConvention :: NamingCase,
+    soExtensionsSchema :: MonadTx.ExtensionsSchema,
+    soMetadataDefaults :: MetadataDefaults,
+    soApolloFederationStatus :: Server.Types.ApolloFederationStatus,
+    soCloseWebsocketsOnMetadataChangeStatus :: Server.Types.CloseWebsocketsOnMetadataChangeStatus,
+    soMaxTotalHeaderLength :: Int,
+    soTriggersErrorLogLevelStatus :: Server.Types.TriggersErrorLogLevelStatus,
+    soRedactEventTriggerLogs :: Server.Types.RedactEventTriggerLogsStatus,
+    soRedactScheduledTriggerLogs :: Server.Types.RedactScheduledTriggerLogsStatus,
+    soRedactActionHandlerLogs :: Server.Types.RedactActionHandlerLogsStatus,
+    soAsyncActionsFetchBatchSize :: Int,
+    soPersistedQueries :: Server.Types.PersistedQueriesState,
+    soPersistedQueriesTtl :: Int,
+    soRemoteSchemaResponsePriority :: Server.Types.RemoteSchemaResponsePriority,
+    soHeaderPrecedence :: Server.Types.HeaderPrecedence,
+    soTraceQueryStatus :: Server.Types.TraceQueryStatus,
+    soDisableNativeQueryValidation :: NativeQuery.Validation.DisableNativeQueryValidation,
+    soPreserve401Errors :: Preserve401ErrorsStatus,
+    soServerTimeout :: Refined NonNegative Int,
+    soLogMaskedVariables :: HashSet Text,
+    soRelayMode :: RelayModeStatus,
+    soRemoteSchemaHealingInterval :: OptionalInterval
+  }
 
-instance FromEnv Int where
-  fromEnv = maybe (Left "Expecting Int value") Right . readMaybe
+-- | 'ResponseInternalErrorsConfig' represents the encoding of the
+-- internal errors in the response to the client.
+--
+-- For more details, see this github comment:
+-- https://github.com/hasura/graphql-engine/issues/4031#issuecomment-609747705
+data ResponseInternalErrorsConfig
+  = InternalErrorsAllRequests
+  | InternalErrorsAdminOnly
+  | InternalErrorsDisabled
+  deriving (Show, Eq)
 
-instance FromEnv AdminSecretHash where
-  fromEnv = Right . hashAdminSecret . T.pack
+shouldIncludeInternal :: RoleName -> ResponseInternalErrorsConfig -> IncludeInternalErrors
+shouldIncludeInternal role = \case
+  InternalErrorsAllRequests -> IncludeInternalErrors
+  InternalErrorsAdminOnly ->
+    if role == adminRoleName
+      then IncludeInternalErrors
+      else HideInternalErrors
+  InternalErrorsDisabled -> HideInternalErrors
 
-instance FromEnv RoleName where
-  fromEnv string = case mkRoleName (T.pack string) of
-    Nothing       -> Left "empty string not allowed"
-    Just roleName -> Right roleName
+--------------------------------------------------------------------------------
 
-instance FromEnv Bool where
-  fromEnv = parseStrAsBool
+-- | The Downgrade Command options. These are only sourced from the
+-- Arg Parser and are used directly in 'Hasura.Server.Migrate'.
+data DowngradeOptions = DowngradeOptions
+  { dgoTargetVersion :: Text,
+    dgoDryRun :: Bool
+  }
+  deriving (Show, Eq)
 
-instance FromEnv Q.TxIsolation where
-  fromEnv = readIsoLevel
+--------------------------------------------------------------------------------
 
-instance FromEnv CorsConfig where
-  fromEnv = readCorsDomains
+-- $experimentalFeatures
+-- Note Experimental features:
+--
+-- The graphql-engine accepts a list of experimental features that can be
+-- enabled at the startup. Experimental features are a way to introduce
+-- new, but not stable features to our users in a manner in which they have
+-- the choice to enable or disable a certain feature(s).
+--
+-- The objective of an experimental feature should be that when the feature is disabled,
+-- the graphql-engine should work the same way as it worked before adding the said feature.
+--
+-- The experimental feature's flag is `--experimental-features` and the corresponding
+-- environment variable is `HASURA_GRAPHQL_EXPERIMENTAL_FEATURES` which expects a comma-seperated
+-- value.
+--
+-- When an experimental feature is stable enough i.e. it's stable through multiple non-beta releases
+-- then we make the feature not experimental i.e. it will always be enabled. Note that when we do this
+-- we still have to support parsing of the experimental feature because users of the previous version
+-- will have it enabled and when they upgrade an error should not be thrown at the startup. For example:
+--
+-- The inherited roles was an experimental feature when introduced and it was enabled by
+-- setting `--experimental-features` to `inherited_roles` and then it was decided to make the inherited roles
+-- a stable feature, so it was removed as an experimental feature but the code was modified such that
+-- `--experimental-features inherited_roles` to not throw an error.
 
-instance FromEnv [API] where
-  fromEnv = readAPIs
+--------------------------------------------------------------------------------
 
-instance FromEnv LQ.BatchSize where
-  fromEnv s = do
-    val <- readEither s
-    maybe (Left "batch size should be a non negative integer") Right $ LQ.mkBatchSize val
-
-instance FromEnv LQ.RefetchInterval where
-  fromEnv x = do
-    val <- fmap (milliseconds . fromInteger) . readEither $ x
-    maybe (Left "refetch interval should be a non negative integer") Right $ LQ.mkRefetchInterval val
-
-instance FromEnv Milliseconds where
-  fromEnv = fmap fromInteger . readEither
-
-instance FromEnv JWTConfig where
-  fromEnv = readJson
-
-instance L.EnabledLogTypes impl => FromEnv [L.EngineLogType impl] where
-  fromEnv = L.parseEnabledLogTypes
-
-instance FromEnv L.LogLevel where
-  fromEnv = readLogLevel
-
-instance FromEnv Cache.CacheSize where
-  fromEnv = Cache.parseCacheSize
-
-type WithEnv a = ReaderT Env (ExceptT String Identity) a
-
-runWithEnv :: Env -> WithEnv a -> Either String a
-runWithEnv env m = runIdentity $ runExceptT $ runReaderT m env
+-- $readOnlyMode
+-- Note ReadOnly Mode:
+--
+-- This mode starts the server in a (database) read-only mode. That is, only
+-- read-only queries are allowed on users' database sources, and write
+-- queries throw a runtime error. The use-case is for failsafe operations.
+-- Metadata APIs are also disabled.
+--
+-- Following is the precise behaviour -
+--   1. For any GraphQL API (relay/hasura; http/websocket) - disable execution of
+--   mutations
+--   2. Metadata API is disabled
+--   3. /v2/query API - insert, delete, update, run_sql are disabled
+--   4. /v1/query API - insert, delete, update, run_sql are disabled
+--   5. No source catalog migrations are run
+--   6. During build schema cache phase, building event triggers are disabled (as
+--   they create corresponding database triggers)

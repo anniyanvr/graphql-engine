@@ -16,7 +16,7 @@ Hasuraは、Postgresをバックエンドに持つGraphQLアプリケーショ�
 
 ------------------
 
-![Hasura GraphQL エンジンデモ](../assets/demo.gif)
+![Hasura GraphQL エンジンデモ](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -75,7 +75,7 @@ Hasuraを試す最も早い方法はHerokuを使うことです。
 
 3. 最初のGraphQLのクエリを発行
 
-   テーブルを作成して、最初のクエリを実行します。こちらの [シンプルなガイド](https://hasura.io/docs/1.0/graphql/manual/getting-started/first-graphql-query.html)を参考にしてください。
+   テーブルを作成して、最初のクエリを実行します。こちらの [シンプルなガイド](https://hasura.io/docs/latest/graphql/core/getting-started/first-graphql-query.html)を参考にしてください。
 
 ### 他のワンクリックでデプロイする方法
 
@@ -83,12 +83,12 @@ Hasuraを試す最も早い方法はHerokuを使うことです。
 
 | **インフラ業者** | **ワンクリックリンク** | **追加情報** |
 |:------------------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:-------------------------------------------------------------------------------------------------------------------------------------------------:|
-| DigitalOcean | [![DigitalOceanへのデプロイ](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [ドキュメント](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
-| Azure | [![Azureへのデプロイ](https://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [ドキュメント](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/azure-container-instances-postgres.html) |
+| DigitalOcean | [![DigitalOceanへのデプロイ](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [ドキュメント](https://hasura.io/docs/latest/graphql/core/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
+| Azure | [![Azureへのデプロイ](https://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [ドキュメント](https://hasura.io/docs/latest/graphql/core/guides/deployment/azure-container-instances-postgres.html) |
 
 ### 他のデプロイ方法
 
-Dockerでのデプロイと高度なカスタマイズオプションについては [デプロイガイド](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) か
+Dockerでのデプロイと高度なカスタマイズオプションについては [デプロイガイド](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) か
 [インストールマニフェスト](../install-manifests)を参考にしてください。
 
 ## アーキテクチャ
@@ -118,28 +118,28 @@ HasuraのPostgresベースのGraphQLスキーマに加えて、リモートス�
 
 ### 派生データまたはデータ変換
 
-PostgreSQLのデータを変換するか、あるいはその上でビジネスロジックを実行することでGraphQLエンジンを使用して問い合わせることができる別のデータセットを派生させる事ができます。[続きを読む](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+PostgreSQLのデータを変換するか、あるいはその上でビジネスロジックを実行することでGraphQLエンジンを使用して問い合わせることができる別のデータセットを派生させる事ができます。[続きを読む](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## デモ
 
-[コミュニティ・サンプル](../community/sample-apps) ディレクトリにあるサンプルアプリケーションをチェックできます。
+[コミュニティ・サンプル](https://github.com/hasura/sample-apps/tree/main) ディレクトリにあるサンプルアプリケーションをチェックできます。
 
 ### リアルタイムアプリケーション
 
 - Reactを使用して構築されたグループチャットアプリケーション。タイピングインジケーター、オンラインユーザー、新しいメッセージ通知が含まれます。
-  - [試してみよう](https://realtime-chat.demo.hasura.app/)
-  - [チュートリアル](../community/sample-apps/realtime-chat)
-  - [APIの参照](https://realtime-chat.demo.hasura.app/console)
+  - [試してみよう](https://realtime-chat.demo.hasura.io/)
+  - [チュートリアル](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [APIの参照](https://realtime-chat.demo.hasura.io/console)
 
 - 現在の場所を追跡できるアプリ。地図上を移動する乗り物の現在のGPS座標を表示します。
-  - [試してみよう](https://realtime-location-tracking.demo.hasura.app/)
-  - [チュートリアル](../community/sample-apps/realtime-location-tracking)
-  - [APIの参照](https://realtime-location-tracking.demo.hasura.app/console)
+  - [試してみよう](https://realtime-location-tracking.demo.hasura.io/)
+  - [チュートリアル](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [APIの参照](https://realtime-location-tracking.demo.hasura.io/console)
 
 - 常にに変化するデータを集約するリアルタイムダッシュボード。
-  - [試してみよう](https://realtime-poll.demo.hasura.app/)
-  - [チュートリアル](../community/sample-apps/realtime-poll)
-  - [APIの参照](https://realtime-poll.demo.hasura.app/console)
+  - [試してみよう](https://realtime-poll.demo.hasura.io/)
+  - [チュートリアル](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [APIの参照](https://realtime-poll.demo.hasura.io/console)
 
 ### 動画
 
@@ -171,19 +171,19 @@ Hasuraブランドの資産（ロゴ、Hasuraマスコット、バッジなど�
 あなたが作ったアプリに"Powered by Hasura"を追加してもらえるととてもうれしいです！
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_black.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- 明るいバックグラウンド用 -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_black.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- 暗いバックグラウンド用 -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

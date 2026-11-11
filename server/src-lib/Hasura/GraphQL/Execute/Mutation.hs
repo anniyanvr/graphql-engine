@@ -1,211 +1,210 @@
 module Hasura.GraphQL.Execute.Mutation
-  ( convertMutationSelectionSet
-  ) where
+  ( convertMutationSelectionSet,
+  )
+where
 
-import           Hasura.Prelude
+import Data.Environment qualified as Env
+import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
+import Data.Tagged qualified as Tagged
+import Data.Text.Extended (toTxt, (<>>))
+import Hasura.Authentication.User (UserInfo (..))
+import Hasura.Base.Error
+import Hasura.GraphQL.Context
+import Hasura.GraphQL.Execute.Action
+import Hasura.GraphQL.Execute.Backend
+import Hasura.GraphQL.Execute.Common
+import Hasura.GraphQL.Execute.Instances ()
+import Hasura.GraphQL.Execute.Remote
+import Hasura.GraphQL.Execute.RemoteJoin.Collect qualified as RJ
+import Hasura.GraphQL.Execute.Resolve
+import Hasura.GraphQL.Namespace
+import Hasura.GraphQL.ParameterizedQueryHash
+import Hasura.GraphQL.Parser.Directives
+import Hasura.GraphQL.Parser.Variable qualified as G
+import Hasura.GraphQL.Schema.Parser (runParse, toQErr)
+import Hasura.GraphQL.Transport.HTTP.Protocol qualified as GH
+import Hasura.Logging qualified as L
+import Hasura.Metadata.Class
+import Hasura.Prelude
+import Hasura.QueryTags
+import Hasura.QueryTags.Types
+import Hasura.RQL.IR
+import Hasura.RQL.IR.ModelInformation
+import Hasura.RQL.Types.Action
+import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.GraphqlSchemaIntrospection
+import Hasura.RemoteSchema.Metadata.Base (RemoteSchemaName (..))
+import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.Server.Prometheus (PrometheusMetrics (..))
+import Hasura.Server.Types
+import Hasura.Services
+import Hasura.Tracing qualified as Tracing
+import Language.GraphQL.Draft.Syntax qualified as G
+import Network.HTTP.Types qualified as HTTP
 
-import qualified Data.Environment                          as Env
-import qualified Data.HashMap.Strict                       as Map
-import qualified Data.HashMap.Strict.InsOrd                as OMap
-import qualified Data.HashSet                              as Set
-import qualified Data.Sequence                             as Seq
-import qualified Data.Sequence.NonEmpty                    as NE
-import qualified Language.GraphQL.Draft.Syntax             as G
-import qualified Network.HTTP.Client                       as HTTP
-import qualified Network.HTTP.Types                        as HTTP
-
-import qualified Hasura.Backends.Postgres.Execute.Mutation as PGE
-import qualified Hasura.GraphQL.Transport.HTTP.Protocol    as GH
-import qualified Hasura.Logging                            as L
-import qualified Hasura.RQL.IR.Delete                      as IR
-import qualified Hasura.RQL.IR.Insert                      as IR
-import qualified Hasura.RQL.IR.Returning                   as IR
-import qualified Hasura.RQL.IR.Select                      as IR
-import qualified Hasura.RQL.IR.Update                      as IR
-import qualified Hasura.Tracing                            as Tracing
-
-import           Hasura.Backends.Postgres.Connection
-import           Hasura.EncJSON
-import           Hasura.GraphQL.Context
-import           Hasura.GraphQL.Execute.Action
-import           Hasura.GraphQL.Execute.Common
-import           Hasura.GraphQL.Execute.Insert
-import           Hasura.GraphQL.Execute.Prepare
-import           Hasura.GraphQL.Execute.Remote
-import           Hasura.GraphQL.Execute.Resolve
-import           Hasura.GraphQL.Parser
-import           Hasura.RQL.Types
-import           Hasura.Server.Version                     (HasVersion)
-import           Hasura.Session
-
-
-convertDelete
-  :: ( HasVersion
-     , MonadError QErr m
-     , MonadTx tx
-     , Tracing.MonadTrace tx
-     , MonadIO tx)
-  => Env.Environment
-  -> SessionVariables
-  -> PGE.MutationRemoteJoinCtx
-  -> IR.AnnDelG 'Postgres (UnpreparedValue 'Postgres)
-  -> Bool
-  -> m (tx EncJSON)
-convertDelete env usrVars remoteJoinCtx deleteOperation stringifyNum = do
-  let (preparedDelete, expectedVariables) = flip runState Set.empty $ IR.traverseAnnDel prepareWithoutPlan deleteOperation
-  validateSessionVariables expectedVariables usrVars
-  pure $ PGE.execDeleteQuery env stringifyNum (Just remoteJoinCtx) (preparedDelete, Seq.empty)
-
-convertUpdate
-  :: ( HasVersion
-     , MonadError QErr m
-     , MonadTx tx
-     , Tracing.MonadTrace tx
-     , MonadIO tx
-     )
-  => Env.Environment
-  -> SessionVariables
-  -> PGE.MutationRemoteJoinCtx
-  -> IR.AnnUpdG 'Postgres (UnpreparedValue 'Postgres)
-  -> Bool
-  -> m (tx EncJSON)
-convertUpdate env usrVars remoteJoinCtx updateOperation stringifyNum = do
-  let (preparedUpdate, expectedVariables) = flip runState Set.empty $ IR.traverseAnnUpd prepareWithoutPlan updateOperation
-  if null $ IR.uqp1OpExps updateOperation
-  then pure $ pure $ IR.buildEmptyMutResp $ IR.uqp1Output preparedUpdate
-  else do
-    validateSessionVariables expectedVariables usrVars
-    pure $ PGE.execUpdateQuery env stringifyNum (Just remoteJoinCtx) (preparedUpdate, Seq.empty)
-
-convertInsert
-  :: ( HasVersion
-     , MonadError QErr m
-     , MonadTx tx
-     , Tracing.MonadTrace tx
-     , MonadIO tx)
-  => Env.Environment
-  -> SessionVariables
-  -> PGE.MutationRemoteJoinCtx
-  -> IR.AnnInsert 'Postgres (UnpreparedValue 'Postgres)
-  -> Bool
-  -> m (tx EncJSON)
-convertInsert env usrVars remoteJoinCtx insertOperation stringifyNum = do
-  let (preparedInsert, expectedVariables) = flip runState Set.empty $ traverseAnnInsert prepareWithoutPlan insertOperation
-  validateSessionVariables expectedVariables usrVars
-  pure $ convertToSQLTransaction env preparedInsert remoteJoinCtx Seq.empty stringifyNum
-
-
-noResponseHeaders :: tx EncJSON -> (tx EncJSON, HTTP.ResponseHeaders)
-noResponseHeaders rTx = (rTx, [])
-
-convertMutationAction
-  ::( HasVersion
-    , MonadIO m
-    , MonadError QErr m
-    , Tracing.MonadTrace m
-    , Tracing.MonadTrace tx
-    , MonadIO tx
-    , MonadTx tx
-    )
-  => Env.Environment
-  -> L.Logger L.Hasura
-  -> UserInfo
-  -> HTTP.Manager
-  -> HTTP.RequestHeaders
-  -> ActionMutation 'Postgres (UnpreparedValue 'Postgres)
-  -> m (tx EncJSON, HTTP.ResponseHeaders)
-convertMutationAction env logger userInfo manager reqHeaders = \case
-  AMSync s  -> (_aerTransaction &&& _aerHeaders) <$>
-    resolveActionExecution env logger userInfo s actionExecContext
-  AMAsync s -> noResponseHeaders <$> resolveActionMutationAsync s reqHeaders userSession
+convertMutationAction ::
+  ( MonadIO m,
+    MonadError QErr m,
+    MonadMetadataStorage m,
+    ProvidesNetwork m,
+    Tracing.MonadTraceContext m
+  ) =>
+  Env.Environment ->
+  L.Logger L.Hasura ->
+  Tracing.HttpPropagator ->
+  PrometheusMetrics ->
+  UserInfo ->
+  HTTP.RequestHeaders ->
+  Maybe GH.GQLQueryText ->
+  ActionMutation Void ->
+  IncludeInternalErrors ->
+  HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
+  m ActionExecutionPlan
+convertMutationAction env logger tracesPropagator prometheusMetrics userInfo reqHeaders gqlQueryText action includeInternalErrors headerPrecedence redactActionHandlerLogs = do
+  httpManager <- askHTTPManager
+  case action of
+    AMSync s ->
+      pure $ AEPSync $ resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics s actionExecContext gqlQueryText includeInternalErrors headerPrecedence redactActionHandlerLogs
+    AMAsync s ->
+      AEPAsyncMutation <$> resolveActionMutationAsync s reqHeaders userSession
   where
     userSession = _uiSession userInfo
-    actionExecContext = ActionExecContext manager reqHeaders $ _uiSession userInfo
+    actionExecContext = ActionExecContext reqHeaders (_uiSession userInfo)
 
+convertMutationSelectionSet ::
+  forall m.
+  ( Tracing.MonadTrace m,
+    MonadIO m,
+    MonadError QErr m,
+    MonadMetadataStorage m,
+    MonadGQLExecutionCheck m,
+    MonadQueryTags m,
+    ProvidesNetwork m
+  ) =>
+  Env.Environment ->
+  L.Logger L.Hasura ->
+  Tracing.HttpPropagator ->
+  PrometheusMetrics ->
+  GQLContext ->
+  SQLGenCtx ->
+  UserInfo ->
+  HTTP.RequestHeaders ->
+  [G.Directive G.Name] ->
+  G.SelectionSet G.NoFragments G.Name ->
+  [G.VariableDefinition] ->
+  GH.GQLReqUnparsed ->
+  SetGraphqlIntrospectionOptions ->
+  RequestId ->
+  -- | Graphql Operation Name
+  Maybe G.Name ->
+  IncludeInternalErrors ->
+  HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
+  TraceQueryStatus ->
+  m (ExecutionPlan, ParameterizedQueryHash, [ModelInfoPart])
 convertMutationSelectionSet
-  :: forall m tx
-   . ( HasVersion
-     , Tracing.MonadTrace m
-     , MonadIO m
-     , MonadError QErr m
-     , MonadTx tx
-     , Tracing.MonadTrace tx
-     , MonadIO tx
-     )
-  => Env.Environment
-  -> L.Logger L.Hasura
-  -> GQLContext
-  -> SQLGenCtx
-  -> UserInfo
-  -> HTTP.Manager
-  -> HTTP.RequestHeaders
-  -> G.SelectionSet G.NoFragments G.Name
-  -> [G.VariableDefinition]
-  -> Maybe GH.VariableValues
-  -> m (ExecutionPlan (tx EncJSON, HTTP.ResponseHeaders))
-convertMutationSelectionSet env logger gqlContext SQLGenCtx{stringifyNum} userInfo manager reqHeaders fields varDefs varValsM = do
-  mutationParser <- onNothing (gqlMutationParser gqlContext) $
-    throw400 ValidationFailed "no mutations exist"
-  -- Parse the GraphQL query into the RQL AST
-  (unpreparedQueries, _reusability)
-    :: (OMap.InsOrdHashMap G.Name (MutationRootField (UnpreparedValue 'Postgres)), QueryReusability)
-    <-  resolveVariables varDefs (fromMaybe Map.empty varValsM) fields
-    >>= (mutationParser >>> (`onLeft` reportParseErrors))
+  env
+  logger
+  tracesPropagator
+  prometheusMetrics
+  gqlContext
+  SQLGenCtx {stringifyNum, noNullUnboundVariableDefault, nullInNonNullableVariables}
+  userInfo
+  reqHeaders
+  directives
+  fields
+  varDefs
+  gqlUnparsed
+  introspectionDisabledRoles
+  reqId
+  maybeOperationName
+  includeInternalErrors
+  headerPrecedence
+  redactActionHandlerLogs
+  traceQueryStatus = do
+    mutationParser <-
+      onNothing (gqlMutationParser gqlContext)
+        $ throw400 ValidationFailed "no mutations exist"
 
-  -- Transform the RQL AST into a prepared SQL query
-  let userSession = _uiSession userInfo
-      remoteJoinCtx = (manager, reqHeaders, userInfo)
-  txs <- for unpreparedQueries \case
-    RFDB db -> ExecStepDB . noResponseHeaders <$> case db of
-      MDBInsert s   -> convertInsert env userSession remoteJoinCtx s stringifyNum
-      MDBUpdate s   -> convertUpdate env userSession remoteJoinCtx s stringifyNum
-      MDBDelete s   -> convertDelete env userSession remoteJoinCtx s stringifyNum
-      MDBFunction s -> convertFunction env userInfo manager reqHeaders s
+    (resolvedDirectives, resolvedSelSet) <- resolveVariables nullInNonNullableVariables noNullUnboundVariableDefault varDefs (fromMaybe HashMap.empty (GH._grVariables gqlUnparsed)) directives fields
+    -- Parse the GraphQL query into the RQL AST
+    (unpreparedQueries :: RootFieldMap (MutationRootField UnpreparedValue)) <-
+      Tracing.newSpan "Parse mutation IR" Tracing.SKInternal $ liftEither $ mutationParser resolvedSelSet
 
-    RFRemote (remoteSchemaInfo, remoteField) ->
-      pure $ buildExecStepRemote
-             remoteSchemaInfo
-             G.OperationTypeMutation
-             varDefs
-             [G.SelectionField remoteField]
-             varValsM
-    RFAction action     -> ExecStepDB <$> convertMutationAction env logger userInfo manager reqHeaders action
-    RFRaw s             -> pure $ ExecStepRaw s
+    -- Process directives on the mutation
+    _dirMap <- toQErr $ runParse (parseDirectives customDirectives (G.DLExecutable G.EDLMUTATION) resolvedDirectives)
+    let parameterizedQueryHash = calculateParameterizedQueryHash resolvedSelSet
+        resolveExecutionSteps rootFieldName rootFieldUnpreparedValue = Tracing.newSpan ("Resolve execution step for " <>> rootFieldName) Tracing.SKInternal do
+          case rootFieldUnpreparedValue of
+            RFDB sourceName exists ->
+              AB.dispatchAnyBackend @BackendExecute
+                exists
+                \(SourceConfigWith (sourceConfig :: SourceConfig b) queryTagsConfig (MDBR db)) -> do
+                  let mReqId =
+                        case _qtcOmitRequestId <$> queryTagsConfig of
+                          -- we include the request id only if a user explicitly wishes for it to be included.
+                          Just False -> Just reqId
+                          _ -> Nothing
+                      mutationQueryTagsAttributes = encodeQueryTags $ QTMutation $ MutationMetadata mReqId maybeOperationName rootFieldName parameterizedQueryHash
+                      queryTagsComment = Tagged.untag $ createQueryTags @m mutationQueryTagsAttributes queryTagsConfig
+                      (noRelsDBAST, remoteJoins) = RJ.getRemoteJoinsMutationDB db
 
-  return txs
+                  httpManager <- askHTTPManager
+                  let selSetArguments = getSelSetArgsFromRootField resolvedSelSet rootFieldName
+                  (dbStepInfo, dbModelInfoList) <- flip runReaderT queryTagsComment $ mkDBMutationPlan @b env httpManager logger userInfo stringifyNum sourceName sourceConfig noRelsDBAST reqHeaders maybeOperationName selSetArguments headerPrecedence traceQueryStatus
+                  pure $ (ExecStepDB [] (AB.mkAnyBackend dbStepInfo) remoteJoins, dbModelInfoList)
+            RFRemote (RemoteSchemaName rName) remoteField -> do
+              RemoteSchemaRootField remoteSchemaInfo resultCustomizer resolvedRemoteField <- runVariableCache $ resolveRemoteField userInfo remoteField
+              let (noRelsRemoteField, remoteJoins) = RJ.getRemoteJoinsGraphQLField resolvedRemoteField
+                  rsModel = ModelInfoPart (toTxt rName) ModelTypeRemoteSchema Nothing Nothing (ModelOperationType G.OperationTypeMutation)
+              pure
+                $ (buildExecStepRemote remoteSchemaInfo resultCustomizer G.OperationTypeMutation noRelsRemoteField remoteJoins (GH._grOperationName gqlUnparsed), [rsModel])
+            RFAction action -> do
+              let (noRelsDBAST, remoteJoins) = RJ.getRemoteJoinsActionMutation action
+              (actionName, _fch) <- pure $ case noRelsDBAST of
+                AMSync s -> (_aaeName s, _aaeForwardClientHeaders s)
+                AMAsync s -> (_aamaName s, _aamaForwardClientHeaders s)
+              plan <- convertMutationAction env logger tracesPropagator prometheusMetrics userInfo reqHeaders (Just (GH._grQuery gqlUnparsed)) noRelsDBAST includeInternalErrors headerPrecedence redactActionHandlerLogs
+              let actionsModel = ModelInfoPart (toTxt actionName) ModelTypeAction Nothing Nothing (ModelOperationType G.OperationTypeMutation)
+              pure $ (ExecStepAction plan (ActionsInfo actionName _fch) remoteJoins, [actionsModel]) -- `_fch` represents the `forward_client_headers` option from the action
+              -- definition which is currently being ignored for actions that are mutations
+            RFRaw customFieldVal -> fmap (,[]) $ flip onLeft throwError =<< executeIntrospection userInfo customFieldVal introspectionDisabledRoles
+            RFMulti lst -> do
+              allSteps <- traverse (resolveExecutionSteps rootFieldName) lst
+              let executionStepsList = map fst allSteps
+                  modelInfoList = map snd allSteps
+              pure $ (ExecStepMulti executionStepsList, concat modelInfoList)
+
+    -- Transform the RQL AST into a prepared SQL query
+    txs <- flip InsOrdHashMap.traverseWithKey unpreparedQueries $ resolveExecutionSteps
+    let executionPlan = InsOrdHashMap.map fst txs
+        modelInfoHashMap = InsOrdHashMap.map snd txs
+
+    let modelInfoList = concat $ InsOrdHashMap.elems modelInfoHashMap
+    return (executionPlan, parameterizedQueryHash, modelInfoList)
+
+-- | Extract the arguments from the selection set for a root field
+-- This is used to validate the arguments of a mutation.
+getSelSetArgsFromRootField :: G.SelectionSet G.NoFragments G.Variable -> RootFieldAlias -> Maybe (HashMap G.Name (G.Value G.Variable))
+getSelSetArgsFromRootField selSet rootFieldName = do
+  let maybeSelSet =
+        case rootFieldName of
+          RootFieldAlias Nothing alias -> getSelSet alias selSet
+          RootFieldAlias (Just namespace) alias -> do
+            let namespaceSelSet = getSelSet namespace selSet
+            case namespaceSelSet of
+              Just (G.SelectionField fld) -> getSelSet alias (G._fSelectionSet fld)
+              _ -> Nothing
+  case maybeSelSet of
+    Just (G.SelectionField fld) -> Just $ (G._fArguments fld)
+    _ -> Nothing
   where
-    reportParseErrors errs = case NE.head errs of
-      -- TODO: Our error reporting machinery doesn’t currently support reporting
-      -- multiple errors at once, so we’re throwing away all but the first one
-      -- here. It would be nice to report all of them!
-      ParseError{ pePath, peMessage, peCode } ->
-        throwError (err400 peCode peMessage){ qePath = pePath }
-
--- | A pared-down version of 'Query.convertQuerySelSet', for use in execution of
--- special case of SQL function mutations (see 'MDBFunction').
-convertFunction
-  :: forall m tx .
-     ( MonadError QErr m
-     , HasVersion
-     , MonadIO tx
-     , MonadTx tx
-     , Tracing.MonadTrace tx
-     )
-  => Env.Environment
-  -> UserInfo
-  -> HTTP.Manager
-  -> HTTP.RequestHeaders
-  -> IR.AnnSimpleSelG 'Postgres (UnpreparedValue 'Postgres)
-  -- ^ VOLATILE function as 'SelectExp'
-  -> m (tx EncJSON)
-convertFunction env userInfo manager reqHeaders unpreparedQuery = do
-  -- Transform the RQL AST into a prepared SQL query
-  (preparedQuery, PlanningSt _ _ planVals expectedVariables)
-    <- flip runStateT initPlanningSt
-       $ IR.traverseAnnSimpleSelect prepareWithPlan unpreparedQuery
-  validateSessionVariables expectedVariables $ _uiSession userInfo
-
-  pure $!
-    fst $ -- forget (Maybe PreparedSql)
-      mkCurPlanTx env manager reqHeaders userInfo id noProfile $
-        RFPPostgres $ irToRootFieldPlan planVals $ QDBSimple preparedQuery
+    getSelSet alias set = flip find set $ \case
+      G.SelectionField fld ->
+        case G._fAlias fld of
+          Nothing -> G.unName alias == G.unName (G._fName fld)
+          Just aliasName -> G.unName alias == G.unName aliasName
+      _ -> False

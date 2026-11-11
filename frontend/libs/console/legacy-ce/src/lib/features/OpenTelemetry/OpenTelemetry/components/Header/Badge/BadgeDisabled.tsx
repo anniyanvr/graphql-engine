@@ -1,0 +1,11 @@
+import { Badge } from '@hasura/shared/ui';
+import { FaTimesCircle } from 'react-icons/fa';
+
+export function BadgeDisabled() {
+  return (
+    <Badge color="gray" className="flex gap-2">
+      <FaTimesCircle />
+      Disabled
+    </Badge>
+  );
+}

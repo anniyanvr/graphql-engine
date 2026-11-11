@@ -1,0 +1,33 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "emitDecoratorMetadata": true,
+    "outDir": "",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["msw-storybook-addon/csf3"]
+  },
+  "files": [
+    "../../../../node_modules/@nx/react/typings/styled-jsx.d.ts",
+    "../../../../node_modules/@nx/react/typings/cssmodule.d.ts",
+    "../../../../node_modules/@nx/react/typings/image.d.ts"
+  ],
+  "exclude": [
+    "../**/*.spec.ts",
+    "../**/*.spec.js",
+    "../**/*.spec.tsx",
+    "../**/*.spec.jsx",
+    "vite.config.mts"
+  ],
+  "include": [
+    "../src/**/*.stories.ts",
+    "../src/**/*.stories.js",
+    "../src/**/*.stories.jsx",
+    "../src/**/*.stories.tsx",
+    "../src/**/*.stories.mdx",
+    "*.js",
+    "*.ts",
+    "*.tsx"
+  ]
+}

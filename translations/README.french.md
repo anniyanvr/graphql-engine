@@ -17,7 +17,7 @@ Plus d'informations sur [hasura.io](https://hasura.io) et dans la [documentation
 
 ------------------
 
-![Démo Hasura GraphQL Engine](../assets/demo.gif)
+![Démo Hasura GraphQL Engine](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -77,11 +77,11 @@ La manière la plus rapide d'essayer Hasura est via Heroku.
 
 3. Réalisez votre première requête GraphQL
 
-   Créez une table et réalisez votre première requête. Suivez ce [guide](https://hasura.io/docs/1.0/graphql/manual/getting-started/first-graphql-query.html).
+   Créez une table et réalisez votre première requête. Suivez ce [guide](https://hasura.io/docs/latest/graphql/core/getting-started/first-graphql-query.html).
 
 ### Autres méthodes de déploiement
 
-Pour les méthodes de déploiement basées sur Docker et les options de configuration avancées, consultez les [guides de déploiement](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) ou les [manifestes d'installation](../install-manifests).
+Pour les méthodes de déploiement basées sur Docker et les options de configuration avancées, consultez les [guides de déploiement](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) ou les [manifestes d'installation](../install-manifests).
 
 ## Architecture
 
@@ -111,31 +111,31 @@ traitements asynchrones - [plus d'informations](event-triggers.french.md).
 
 ### Données dérivée ou transformations de données
 
-Transformez les données dans Postgres ou exécutez de la logique métier dessus pour en deriver un autre jeu de données qui peut être requêté à l'aide de GraphQL Engine - [plus d'informations](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+Transformez les données dans Postgres ou exécutez de la logique métier dessus pour en deriver un autre jeu de données qui peut être requêté à l'aide de GraphQL Engine - [plus d'informations](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## Démos
 
 Consultez toutes les applications d'example dans le répertoire
-[community/sample-apps](../community/sample-apps).
+[hasura/sample-apps](https://github.com/hasura/sample-apps/tree/main).
 
 ### Applications temps-réel
 
 - Application de messagerie de groupe développée avec React, incluant un indicateur de frappe, les utilisateurs connectés & les
   notifications de nouveaux messages.
-  - [Essayez la](https://realtime-chat.demo.hasura.app/)
-  - [Tutoriel](../community/sample-apps/realtime-chat)
-  - [Explorez les APIs](https://realtime-chat.demo.hasura.app/console)
+  - [Essayez la](https://realtime-chat.demo.hasura.io/)
+  - [Tutoriel](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Explorez les APIs](https://realtime-chat.demo.hasura.io/console)
 
 - Application de localisation en temps-réel montrant un véhicule dont les coordonnées GPS évoluent
   se déplacer sur une carte.
-  - [Essayez la](https://realtime-location-tracking.demo.hasura.app/)
-  - [Tutoriel](../community/sample-apps/realtime-location-tracking)
-  - [Explorez les APIs](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Essayez la](https://realtime-location-tracking.demo.hasura.io/)
+  - [Tutoriel](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Explorez les APIs](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Un tableau de bord temps-réel pour l'aggrégation de données en constante évolution.
-  - [Essayez la](https://realtime-poll.demo.hasura.app/)
-  - [Tutoriel](../community/sample-apps/realtime-poll)
-  - [Explorez les APIs](https://realtime-poll.demo.hasura.app/console)
+  - [Essayez la](https://realtime-poll.demo.hasura.io/)
+  - [Tutoriel](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Explorez les APIs](https://realtime-poll.demo.hasura.io/console)
 
 ### Vidéos
 
@@ -170,19 +170,19 @@ application/site Web etc... Nous serions ravis si vous ajoutiez le badge "Powere
 à votre application développée à l'aide d'Hasura. ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_black.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- Pour les fonds clairs -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_black.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- Pour les fonds foncés -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

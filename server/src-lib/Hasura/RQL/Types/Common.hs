@@ -1,472 +1,811 @@
+{-# LANGUAGE OverloadedLists #-}
+
 module Hasura.RQL.Types.Common
-       ( RelName(..)
-       , relNameToTxt
-       , RelType(..)
-       , rootRelName
-       , relTypeToTxt
-       , RelInfo(..)
+  ( RelName (..),
+    relNameToTxt,
+    fromRemoteRelationship,
+    RelType (..),
+    relTypeToTxt,
+    OID (..),
+    FieldName (..),
+    Fields,
+    InsertOrder (..),
+    ToAesonPairs (..),
+    InpValInfo (..),
+    SystemDefined (..),
+    isSystemDefined,
+    SQLGenCtx (..),
+    successMsg,
+    failureMsg,
+    InputWebhook (..),
+    ResolvedWebhook (..),
+    ResolveWebhookError (..),
+    resolveWebhook,
+    resolveWebhookEither,
+    Timeout (..),
+    defaultActionTimeoutSecs,
+    UrlConf (..),
+    resolveUrlConf,
+    getEnv,
+    getEnvEither,
+    SourceName (..),
+    defaultSource,
+    sourceNameToText,
+    JsonAggSelect (..),
+    MetricsConfig (..),
+    emptyMetricsConfig,
+    PGConnectionParams (..),
+    getPGConnectionStringFromParams,
+    getConnOptionsFromConnParams,
+    Comment (..),
+    commentToMaybeText,
+    commentFromMaybeText,
+    EnvRecord (..),
+    ApolloFederationConfig (..),
+    ApolloFederationVersion (..),
+    isApolloFedV1enabled,
+    RemoteRelationshipG (..),
+    remoteRelationshipCodec,
+    rrDefinition,
+    rrName,
+    TriggerOnReplication (..),
+  )
+where
 
-       , Backend (..)
+import Autodocodec
+  ( HasCodec (codec),
+    JSONCodec,
+    bimapCodec,
+    boundedIntegralCodec,
+    dimapCodec,
+    disjointEitherCodec,
+    optionalFieldOrNull',
+    requiredField,
+    requiredField',
+    requiredFieldWith',
+    stringConstCodec,
+  )
+import Autodocodec qualified as AC
+import Autodocodec.Extended (boolConstCodec, fromEnvCodec, typeableName)
+import Control.Lens (Lens)
+import Control.Lens qualified as Lens
+import Data.Aeson
+import Data.Aeson qualified as J
+import Data.Aeson.Types (Parser, prependFailure, typeMismatch)
+import Data.Bifunctor (bimap)
+import Data.Environment qualified as Env
+import Data.List (isPrefixOf)
+import Data.Scientific (toBoundedInteger)
+import Data.Text qualified as T
+import Data.Text.Extended
+import Data.Text.NonEmpty
+import Data.Typeable (Typeable)
+import Data.URL.Template
+import Database.PG.Query qualified as PG
+import Hasura.Base.Error
+import Hasura.Base.ErrorValue qualified as ErrorValue
+import Hasura.Base.Instances ()
+import Hasura.Base.ToErrorValue
+import Hasura.EncJSON
+import Hasura.Prelude
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Language.GraphQL.Draft.Syntax qualified as G
+import Language.Haskell.TH.Syntax qualified as TH
+import Network.URI
+import PostgreSQL.Binary.Decoding qualified as PD
+import System.Directory (canonicalizePath)
 
-       , FieldName(..)
-       , fromPGCol
-       , fromRel
-
-       , ToAesonPairs(..)
-       , WithTable(..)
-       , ColumnValues
-       , MutateResp(..)
-
-       , OID(..)
-       , Constraint(..)
-       , PrimaryKey(..)
-       , pkConstraint
-       , pkColumns
-       , ForeignKey(..)
-       , EquatableGType(..)
-       , InpValInfo(..)
-       , CustomColumnNames
-
-       , adminText
-       , rootText
-
-       , SystemDefined(..)
-       , isSystemDefined
-
-       , successMsg
-       , NonNegativeDiffTime
-       , unNonNegativeDiffTime
-       , unsafeNonNegativeDiffTime
-       , mkNonNegativeDiffTime
-       , InputWebhook(..)
-       , ResolvedWebhook(..)
-       , resolveWebhook
-       , NonNegativeInt
-       , getNonNegativeInt
-       , mkNonNegativeInt
-       , unsafeNonNegativeInt
-       , Timeout(..)
-       , defaultActionTimeoutSecs
-
-       , UrlConf(..)
-       , resolveUrlConf
-       , getEnv
-       ) where
-
-import           Hasura.Prelude
-
-import qualified Data.Environment                   as Env
-import qualified Data.HashMap.Strict                as HM
-import qualified Data.Text                          as T
-import qualified Database.PG.Query                  as Q
-import qualified Language.GraphQL.Draft.Syntax      as G
-import qualified Language.Haskell.TH.Syntax         as TH
-import qualified PostgreSQL.Binary.Decoding         as PD
-import qualified Test.QuickCheck                    as QC
-
-import           Control.Lens                       (makeLenses)
-import           Data.Aeson
-import           Data.Aeson.Casing
-import           Data.Aeson.TH
-import           Data.Bifunctor                     (bimap)
-import           Data.Kind                          (Type)
-import           Data.Scientific                    (toBoundedInteger)
-import           Data.Text.Extended
-import           Data.Text.NonEmpty
-import           Data.Typeable
-import           Data.URL.Template
-
-import qualified Hasura.Backends.Postgres.SQL.DML   as PG
-import qualified Hasura.Backends.Postgres.SQL.Types as PG
-import qualified Hasura.Backends.Postgres.SQL.Value as PG
-
-import           Hasura.EncJSON
-import           Hasura.Incremental                 (Cacheable)
-import           Hasura.RQL.DDL.Headers             ()
-import           Hasura.RQL.Types.Error
-import           Hasura.SQL.Backend
-
-
-type Representable a = (Show a, Eq a, Hashable a, Cacheable a, NFData a)
-
--- | Mapping from abstract types to concrete backend representation
---
--- The RQL IR, used as the output of GraphQL parsers and of the RQL parsers, is
--- backend-agnostic: it uses an abstract representation of the structure of a
--- query, and delegates to the backends the task of choosing an appropriate
--- concrete representation.
---
--- Additionally, grouping all those types under one typeclass rather than having
--- dedicated type families allows to explicitly list all typeclass requirements,
--- which simplifies the instance declarations of all IR types.
-class
-  ( Representable (Identifier b)
-  , Representable (TableName b)
-  , Representable (FunctionName b)
-  , Representable (ConstraintName b)
-  , Representable (BasicOrderType b)
-  , Representable (NullsOrderType b)
-  , Representable (Column b)
-  , Representable (ScalarType b)
-  , Representable (SQLExpression b)
-  , Representable (SQLOperator b)
-  , Representable (XAILIKE b)
-  , Representable (XANILIKE b)
-  , Ord (TableName b)
-  , Ord (ScalarType b)
-  , Data (TableName b)
-  , Data (ScalarType b)
-  , Data (SQLExpression b)
-  , FromJSON (TableName b)
-  , FromJSON (ScalarType b)
-  , FromJSON (BasicOrderType b)
-  , FromJSON (NullsOrderType b)
-  , FromJSON (Column b)
-  , ToJSON (TableName b)
-  , ToJSON (ScalarType b)
-  , ToJSON (BasicOrderType b)
-  , ToJSON (NullsOrderType b)
-  , ToJSON (Column b)
-  , FromJSONKey (Column b)
-  , ToJSONKey (Column b)
-  , ToTxt (TableName b)
-  , ToTxt (ScalarType b)
-  , Typeable b
-  ) => Backend (b :: BackendType) where
-  type Identifier      b :: Type
-  type Alias           b :: Type
-  type TableName       b :: Type
-  type FunctionName    b :: Type
-  type ConstraintName  b :: Type
-  type BasicOrderType  b :: Type
-  type NullsOrderType  b :: Type
-  type CountType       b :: Type
-  type Column          b :: Type
-  type ColumnValueType b :: Type
-  type ScalarType      b :: Type
-  type SQLExpression   b :: Type
-  type SQLOperator     b :: Type
-  type SessionVarType  b :: Type
-  type XAILIKE         b :: Type
-  type XANILIKE        b :: Type
-
-instance Backend 'Postgres where
-  type Identifier      'Postgres = PG.Identifier
-  type Alias           'Postgres = PG.Alias
-  type TableName       'Postgres = PG.QualifiedTable
-  type FunctionName    'Postgres = PG.QualifiedFunction
-  type ConstraintName  'Postgres = PG.ConstraintName
-  type BasicOrderType  'Postgres = PG.OrderType
-  type NullsOrderType  'Postgres = PG.NullsOrder
-  type CountType       'Postgres = PG.CountType
-  type Column          'Postgres = PG.PGCol
-  type ColumnValueType 'Postgres = PG.WithScalarType PG.PGScalarValue
-  type ScalarType      'Postgres = PG.PGScalarType
-  type SQLExpression   'Postgres = PG.SQLExp
-  type SQLOperator     'Postgres = PG.SQLOp
-  type SessionVarType  'Postgres = PG.PGType PG.PGScalarType
-  type XAILIKE         'Postgres = ()
-  type XANILIKE        'Postgres = ()
-
--- instance Backend 'Mysql where
---   type XAILIKE 'MySQL = Void
---   type XANILIKE 'MySQL = Void
-
-
-adminText :: NonEmptyText
-adminText = mkNonEmptyTextUnsafe "admin"
-
-rootText :: NonEmptyText
-rootText = mkNonEmptyTextUnsafe "root"
-
-newtype RelName
-  = RelName { getRelTxt :: NonEmptyText }
-  deriving (Show, Eq, Hashable, FromJSON, ToJSON, ToJSONKey, Q.ToPrepArg, Q.FromCol, Generic, Arbitrary, NFData, Cacheable)
-
-instance PG.IsIdentifier RelName where
-  toIdentifier rn = PG.Identifier $ relNameToTxt rn
+newtype RelName = RelName {getRelTxt :: NonEmptyText}
+  deriving
+    ( Show,
+      Eq,
+      Ord,
+      Hashable,
+      FromJSON,
+      FromJSONKey,
+      ToJSON,
+      ToJSONKey,
+      PG.ToPrepArg,
+      PG.FromCol,
+      Generic,
+      NFData
+    )
 
 instance ToTxt RelName where
   toTxt = relNameToTxt
 
-rootRelName :: RelName
-rootRelName = RelName rootText
+instance HasCodec RelName where
+  codec = dimapCodec RelName getRelTxt codec
 
 relNameToTxt :: RelName -> Text
 relNameToTxt = unNonEmptyText . getRelTxt
 
-relTypeToTxt :: RelType -> Text
-relTypeToTxt ObjRel = "object"
-relTypeToTxt ArrRel = "array"
+fromRemoteRelationship :: RelName -> FieldName
+fromRemoteRelationship = FieldName . relNameToTxt
 
 data RelType
   = ObjRel
   | ArrRel
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Ord, Generic, Data)
+
 instance NFData RelType
+
 instance Hashable RelType
-instance Cacheable RelType
+
+instance HasCodec RelType where
+  codec =
+    stringConstCodec
+      [ (ObjRel, relTypeToTxt ObjRel),
+        (ArrRel, relTypeToTxt ArrRel)
+      ]
 
 instance ToJSON RelType where
   toJSON = String . relTypeToTxt
 
 instance FromJSON RelType where
   parseJSON (String "object") = return ObjRel
-  parseJSON (String "array")  = return ArrRel
-  parseJSON _                 = fail "expecting either 'object' or 'array' for rel_type"
+  parseJSON (String "array") = return ArrRel
+  parseJSON _ = fail "expecting either 'object' or 'array' for rel_type"
 
-instance Q.FromCol RelType where
-  fromCol bs = flip Q.fromColHelper bs $ PD.enum $ \case
-    "object" -> Just ObjRel
-    "array"  -> Just ArrRel
-    _        -> Nothing
+instance PG.FromCol RelType where
+  fromCol bs = flip PG.fromColHelper bs
+    $ PD.enum
+    $ \case
+      "object" -> Just ObjRel
+      "array" -> Just ArrRel
+      _ -> Nothing
 
--- should this be parameterized by both the source and the destination backend?
-data RelInfo (b :: BackendType)
-  = RelInfo
-  { riName       :: !RelName
-  , riType       :: !RelType
-  , riMapping    :: !(HashMap (Column b) (Column b))
-  , riRTable     :: !(TableName b)
-  , riIsManual   :: !Bool
-  , riIsNullable :: !Bool
-  } deriving (Generic)
-deriving instance Backend b => Show (RelInfo b)
-deriving instance Backend b => Eq   (RelInfo b)
-instance Backend b => NFData (RelInfo b)
-instance Backend b => Cacheable (RelInfo b)
-instance Backend b => Hashable (RelInfo b)
+relTypeToTxt :: RelType -> Text
+relTypeToTxt ObjRel = "object"
+relTypeToTxt ArrRel = "array"
 
-instance (Backend b) => FromJSON (RelInfo b) where
-  parseJSON = genericParseJSON $ aesonPrefix snakeCase
+data JsonAggSelect
+  = JASMultipleRows
+  | JASSingleObject
+  deriving (Show, Eq, Generic)
 
-instance (Backend b) => ToJSON (RelInfo b) where
-  toJSON = genericToJSON $ aesonPrefix snakeCase
+instance Hashable JsonAggSelect
 
+instance ToJSON JsonAggSelect where
+  toJSON = \case
+    JASMultipleRows -> "multiple_rows"
+    JASSingleObject -> "single_row"
 
-newtype FieldName
-  = FieldName { getFieldNameTxt :: Text }
-  deriving ( Show, Eq, Ord, Hashable, FromJSON, ToJSON
-           , FromJSONKey, ToJSONKey, Data, Generic
-           , IsString, Arbitrary, NFData, Cacheable
-           , Semigroup
-           )
+data InsertOrder = BeforeParent | AfterParent
+  deriving (Show, Eq, Ord, Generic)
 
-instance PG.IsIdentifier FieldName where
-  toIdentifier (FieldName f) = PG.Identifier f
+instance NFData InsertOrder
+
+instance Hashable InsertOrder
+
+instance HasCodec InsertOrder where
+  codec =
+    stringConstCodec
+      [ (BeforeParent, "before_parent"),
+        (AfterParent, "after_parent")
+      ]
+
+instance FromJSON InsertOrder where
+  parseJSON (String t)
+    | t == "before_parent" = pure BeforeParent
+    | t == "after_parent" = pure AfterParent
+  parseJSON _ =
+    fail "insertion_order should be 'before_parent' or 'after_parent'"
+
+instance ToJSON InsertOrder where
+  toJSON = \case
+    BeforeParent -> String "before_parent"
+    AfterParent -> String "after_parent"
+
+-- | Postgres OIDs. <https://www.postgresql.org/docs/12/datatype-oid.html>
+newtype OID = OID {unOID :: Int}
+  deriving (Show, Eq, NFData, Hashable, ToJSON, FromJSON, PG.FromCol)
+
+newtype FieldName = FieldName {getFieldNameTxt :: Text}
+  deriving
+    ( Show,
+      Eq,
+      Ord,
+      Hashable,
+      FromJSON,
+      ToJSON,
+      FromJSONKey,
+      ToJSONKey,
+      Data,
+      Generic,
+      IsString,
+      NFData,
+      Semigroup
+    )
 
 instance ToTxt FieldName where
   toTxt (FieldName c) = c
 
-fromPGCol :: PG.PGCol -> FieldName
-fromPGCol c = FieldName $ PG.getPGColTxt c
+instance HasCodec FieldName where
+  codec = dimapCodec FieldName getFieldNameTxt codec
 
-fromRel :: RelName -> FieldName
-fromRel = FieldName . relNameToTxt
+-- The field name here is the GraphQL alias, i.e, the name with which the field
+-- should appear in the response
+type Fields a = [(FieldName, a)]
 
 class ToAesonPairs a where
-  toAesonPairs :: (KeyValue v) => a -> [v]
+  toAesonPairs :: (KeyValue e v) => a -> [v]
 
-data WithTable a
-  = WithTable
-  { wtName :: !PG.QualifiedTable
-  , wtInfo :: !a
-  } deriving (Show, Eq)
+data SourceName
+  = SNDefault
+  | SNName NonEmptyText
+  deriving (Show, Eq, Ord, Generic)
 
-instance (FromJSON a) => FromJSON (WithTable a) where
-  parseJSON v@(Object o) =
-    WithTable <$> o .: "table" <*> parseJSON v
-  parseJSON _ =
-    fail "expecting an Object with key 'table'"
+sourceNameParser :: Text -> Parser SourceName
+sourceNameParser = \case
+  "default" -> pure SNDefault
+  t -> SNName <$> parseJSON (String t)
 
-instance (ToAesonPairs a) => ToJSON (WithTable a) where
-  toJSON (WithTable tn rel) =
-    object $ ("table" .= tn):toAesonPairs rel
+instance FromJSON SourceName where
+  parseJSON = withText "String" sourceNameParser
 
-type ColumnValues a = HM.HashMap PG.PGCol a
+instance FromJSONKey SourceName
 
-data MutateResp a
-  = MutateResp
-  { _mrAffectedRows     :: !Int
-  , _mrReturningColumns :: ![ColumnValues a]
-  } deriving (Show, Eq)
-$(deriveJSON (aesonDrop 3 snakeCase) ''MutateResp)
+instance HasCodec SourceName where
+  codec = dimapCodec dec enc nonEmptyTextCodec
+    where
+      dec t
+        | t == defaultSourceName = SNDefault
+        | otherwise = SNName t
 
+      enc SNDefault = defaultSourceName
+      enc (SNName t) = t
 
-type ColMapping = HM.HashMap PG.PGCol PG.PGCol
+sourceNameToText :: SourceName -> Text
+sourceNameToText = \case
+  SNDefault -> unNonEmptyText defaultSourceName
+  SNName t -> unNonEmptyText t
 
--- | Postgres OIDs. <https://www.postgresql.org/docs/12/datatype-oid.html>
-newtype OID = OID { unOID :: Int }
-  deriving (Show, Eq, NFData, Hashable, ToJSON, FromJSON, Q.FromCol, Cacheable)
+instance ToJSON SourceName where
+  toJSON = String . sourceNameToText
 
-data Constraint
-  = Constraint
-  { _cName :: !PG.ConstraintName
-  , _cOid  :: !OID
-  } deriving (Show, Eq, Generic)
-instance NFData Constraint
-instance Hashable Constraint
-instance Cacheable Constraint
-$(deriveJSON (aesonDrop 2 snakeCase) ''Constraint)
+instance ToTxt SourceName where
+  toTxt = sourceNameToText
 
-data PrimaryKey a
-  = PrimaryKey
-  { _pkConstraint :: !Constraint
-  , _pkColumns    :: !(NESeq a)
-  } deriving (Show, Eq, Generic, Foldable)
-instance (NFData a) => NFData (PrimaryKey a)
-instance (Cacheable a) => Cacheable (PrimaryKey a)
-$(makeLenses ''PrimaryKey)
-$(deriveJSON (aesonDrop 3 snakeCase) ''PrimaryKey)
+instance ToErrorValue SourceName where
+  toErrorValue = \case
+    SNDefault -> "default"
+    SNName t -> ErrorValue.squote (unNonEmptyText t)
 
-data ForeignKey
-  = ForeignKey
-  { _fkConstraint    :: !Constraint
-  , _fkForeignTable  :: !PG.QualifiedTable
-  , _fkColumnMapping :: !ColMapping
-  } deriving (Show, Eq, Generic)
-instance NFData ForeignKey
-instance Hashable ForeignKey
-instance Cacheable ForeignKey
-$(deriveJSON (aesonDrop 3 snakeCase) ''ForeignKey)
+instance ToJSONKey SourceName
 
-data InpValInfo
-  = InpValInfo
-  { _iviDesc   :: !(Maybe G.Description)
-  , _iviName   :: !G.Name
-  , _iviDefVal :: !(Maybe (G.Value Void))
-  , _iviType   :: !G.GType
-  } deriving (Show, Eq, TH.Lift, Generic)
-instance Cacheable InpValInfo
+instance Hashable SourceName
 
-instance EquatableGType InpValInfo where
-  type EqProps InpValInfo = (G.Name, G.GType)
-  getEqProps ity = (,) (_iviName ity) (_iviType ity)
+instance NFData SourceName
 
--- | Typeclass for equating relevant properties of various GraphQL types defined below
-class EquatableGType a where
-  type EqProps a
-  getEqProps :: a -> EqProps a
+defaultSource :: SourceName
+defaultSource = SNDefault
 
-type CustomColumnNames = HM.HashMap PG.PGCol G.Name
+defaultSourceName :: NonEmptyText
+defaultSourceName = mkNonEmptyTextUnsafe "default"
 
-newtype SystemDefined = SystemDefined { unSystemDefined :: Bool }
-  deriving (Show, Eq, FromJSON, ToJSON, Q.ToPrepArg, NFData, Cacheable)
+data InpValInfo = InpValInfo
+  { _iviDesc :: Maybe G.Description,
+    _iviName :: G.Name,
+    _iviDefVal :: Maybe (G.Value Void),
+    _iviType :: G.GType
+  }
+  deriving (Show, Eq, TH.Lift, Generic)
+
+newtype SystemDefined = SystemDefined {unSystemDefined :: Bool}
+  deriving (Show, Eq, FromJSON, ToJSON, PG.ToPrepArg, NFData, Generic)
 
 isSystemDefined :: SystemDefined -> Bool
 isSystemDefined = unSystemDefined
 
+data SQLGenCtx = SQLGenCtx
+  { stringifyNum :: Options.StringifyNumbers,
+    dangerousBooleanCollapse :: Options.DangerouslyCollapseBooleans,
+    nullInNonNullableVariables :: Options.BackwardsCompatibleNullInNonNullableVariables,
+    noNullUnboundVariableDefault :: Options.NoNullUnboundVariableDefault,
+    removeEmptySubscriptionResponses :: Options.RemoveEmptySubscriptionResponses,
+    remoteNullForwardingPolicy :: Options.RemoteNullForwardingPolicy,
+    optimizePermissionFilters :: Options.OptimizePermissionFilters,
+    bigqueryStringNumericInput :: Options.BigQueryStringNumericInput,
+    namingConventionSep2023 :: Options.NamingConventionSep2023
+  }
+  deriving (Show, Eq)
+
 successMsg :: EncJSON
-successMsg = "{\"message\":\"success\"}"
+successMsg = encJFromBuilder "{\"message\":\"success\"}"
 
-newtype NonNegativeInt = NonNegativeInt { getNonNegativeInt :: Int }
-  deriving (Show, Eq, ToJSON, Generic, NFData, Cacheable, Num)
+failureMsg :: EncJSON
+failureMsg = encJFromBuilder "{\"message\":\"failure\"}"
 
-mkNonNegativeInt :: Int -> Maybe NonNegativeInt
-mkNonNegativeInt x = case x >= 0 of
-  True  -> Just $ NonNegativeInt x
-  False -> Nothing
+newtype ResolvedWebhook = ResolvedWebhook {unResolvedWebhook :: Text}
+  deriving (Show, Eq, FromJSON, ToJSON, Hashable, ToTxt, Generic)
 
-unsafeNonNegativeInt :: Int -> NonNegativeInt
-unsafeNonNegativeInt = NonNegativeInt
+instance NFData ResolvedWebhook
 
-instance FromJSON NonNegativeInt where
-  parseJSON = withScientific "NonNegativeInt" $ \t -> do
-    case t >= 0 of
-      True  -> maybe (fail "integer passed is out of bounds") (pure . NonNegativeInt) $ toBoundedInteger t
-      False -> fail "negative value not allowed"
-
-newtype NonNegativeDiffTime = NonNegativeDiffTime { unNonNegativeDiffTime :: DiffTime }
-  deriving (Show, Eq,ToJSON,Generic, NFData, Cacheable, Num)
-
-unsafeNonNegativeDiffTime :: DiffTime -> NonNegativeDiffTime
-unsafeNonNegativeDiffTime = NonNegativeDiffTime
-
-mkNonNegativeDiffTime :: DiffTime -> Maybe NonNegativeDiffTime
-mkNonNegativeDiffTime x = case x >= 0 of
-  True  -> Just $ NonNegativeDiffTime x
-  False -> Nothing
-
-instance FromJSON NonNegativeDiffTime where
-  parseJSON = withScientific "NonNegativeDiffTime" $ \t -> do
-    case t >= 0 of
-      True  -> return $ NonNegativeDiffTime . realToFrac $ t
-      False -> fail "negative value not allowed"
-
-newtype ResolvedWebhook
-  = ResolvedWebhook { unResolvedWebhook :: Text}
-  deriving ( Show, Eq, FromJSON, ToJSON, Hashable, ToTxt)
-
-newtype InputWebhook
-  = InputWebhook {unInputWebhook :: URLTemplate}
+-- TODO this seems to be a "URL template"; rename
+newtype InputWebhook = InputWebhook {unInputWebhook :: Template}
   deriving (Show, Eq, Generic)
+
 instance NFData InputWebhook
-instance Cacheable InputWebhook
+
+instance Hashable InputWebhook
+
+instance HasCodec InputWebhook where
+  codec = dimapCodec InputWebhook unInputWebhook urlTemplateCodec
+    where
+      urlTemplateCodec =
+        bimapCodec
+          (mapLeft ("Parsing URL template failed: " ++) . parseTemplate)
+          printTemplate
+          codec
 
 instance ToJSON InputWebhook where
-  toJSON =  String . printURLTemplate . unInputWebhook
+  toJSON = String . printTemplate . unInputWebhook
 
 instance FromJSON InputWebhook where
   parseJSON = withText "String" $ \t ->
-    case parseURLTemplate t of
-      Left e  -> fail $ "Parsing URL template failed: " ++ e
+    case parseTemplate t of
+      Left e -> fail $ "Parsing URL template failed: " ++ e
       Right v -> pure $ InputWebhook v
 
-instance Q.FromCol InputWebhook where
+instance PG.FromCol InputWebhook where
   fromCol bs = do
-    urlTemplate <- parseURLTemplate <$> Q.fromCol bs
+    urlTemplate <- parseTemplate <$> PG.fromCol bs
     bimap (\e -> "Parsing URL template failed: " <> T.pack e) InputWebhook urlTemplate
 
-resolveWebhook :: QErrM m => Env.Environment -> InputWebhook -> m ResolvedWebhook
-resolveWebhook env (InputWebhook urlTemplate) = do
-  let eitherRenderedTemplate = renderURLTemplate env urlTemplate
-  either (throw400 Unexpected . T.pack)
-    (pure . ResolvedWebhook) eitherRenderedTemplate
+-- Consists of the environment variable name with missing/invalid value
+newtype ResolveWebhookError = ResolveWebhookError {unResolveWebhookError :: Text} deriving (Show, ToTxt)
 
-newtype Timeout = Timeout { unTimeout :: Int }
-  deriving (Show, Eq, ToJSON, Generic, NFData, Cacheable)
+resolveWebhook :: (QErrM m) => Env.Environment -> InputWebhook -> m ResolvedWebhook
+resolveWebhook env inputWebhook = do
+  let eitherRenderedTemplate = resolveWebhookEither env inputWebhook
+  onLeft
+    eitherRenderedTemplate
+    (throw400 Unexpected . ("Value for environment variables not found: " <>) . unResolveWebhookError)
+
+-- This is similar to `resolveWebhook` but it doesn't fail when an env var is invalid
+resolveWebhookEither :: Env.Environment -> InputWebhook -> Either ResolveWebhookError ResolvedWebhook
+resolveWebhookEither env (InputWebhook urlTemplate) =
+  bimap ResolveWebhookError ResolvedWebhook (renderTemplate env urlTemplate)
+
+newtype Timeout = Timeout {unTimeout :: Int}
+  deriving (Show, Eq, ToJSON, Generic, NFData)
+
+instance HasCodec Timeout where
+  codec = bimapCodec dec enc boundedIntegralCodec
+    where
+      dec timeout = case timeout >= 0 of
+        True -> Right $ Timeout timeout
+        False -> Left "timeout value cannot be negative"
+      enc (Timeout n) = n
 
 instance FromJSON Timeout where
   parseJSON = withScientific "Timeout" $ \t -> do
     timeout <- onNothing (toBoundedInteger t) $ fail (show t <> " is out of bounds")
     case timeout >= 0 of
-      True  -> return $ Timeout timeout
+      True -> return $ Timeout timeout
       False -> fail "timeout value cannot be negative"
-
-instance Arbitrary Timeout where
-  arbitrary = Timeout <$> QC.choose (0, 10000000)
 
 defaultActionTimeoutSecs :: Timeout
 defaultActionTimeoutSecs = Timeout 30
 
-data UrlConf
-  = UrlValue !InputWebhook
-  | UrlFromEnv !T.Text
+-- | See API reference here:
+--   https://hasura.io/docs/latest/graphql/core/api-reference/syntax-defs.html#pgconnectionparameters
+data PGConnectionParams = PGConnectionParams
+  { _pgcpHost :: Text,
+    _pgcpUsername :: Text,
+    _pgcpPassword :: Maybe Text,
+    _pgcpPort :: Int,
+    _pgcpDatabase :: Text
+  }
   deriving (Show, Eq, Generic)
+
+instance NFData PGConnectionParams
+
+instance Hashable PGConnectionParams
+
+instance HasCodec PGConnectionParams where
+  codec =
+    AC.object "PGConnectionParams"
+      $ PGConnectionParams
+      <$> requiredField' "host"
+      AC..= _pgcpHost
+        <*> requiredField' "username"
+      AC..= _pgcpUsername
+        <*> optionalFieldOrNull' "password"
+      AC..= _pgcpPassword
+        <*> requiredField' "port"
+      AC..= _pgcpPort
+        <*> requiredField' "database"
+      AC..= _pgcpDatabase
+
+-- TODO: Use HasCodec to define Aeson instances?
+instance ToJSON PGConnectionParams where
+  toJSON PGConnectionParams {..} =
+    J.object
+      $ [ "host" .= _pgcpHost,
+          "username" .= _pgcpUsername,
+          "port" .= _pgcpPort,
+          "database" .= _pgcpDatabase
+        ]
+      ++ ["password" .= _pgcpPassword | isJust _pgcpPassword]
+
+instance FromJSON PGConnectionParams where
+  parseJSON = withObject "PGConnectionParams" $ \o ->
+    PGConnectionParams
+      <$> o
+      .: "host"
+      <*> o
+      .: "username"
+      <*> o
+      .:? "password"
+      <*> o
+      .: "port"
+      <*> o
+      .: "database"
+
+-- | user PG connection configuration from which we'll eventually make a 'ConnInfo'
+data UrlConf
+  = -- | the database connection string
+    UrlValue InputWebhook
+  | -- | the name of environment variable containing the connection string
+    UrlFromEnv T.Text
+  | -- | the minimum required `connection parameters` to construct a valid connection string
+    UrlFromParams PGConnectionParams
+  | -- | Filepath to a file containing a connection string. This is read
+    -- before each connect, and when in use connection errors will force a
+    -- re-read. This can support e.g. environments where passwords are
+    -- frequently rotated (not supported on cloud)
+    --
+    -- This gets piped all the way through into the ConnInfo.
+    UrlDynamicFromFile FilePath
+  deriving (Show, Eq, Generic)
+
 instance NFData UrlConf
-instance Cacheable UrlConf
+
+instance Hashable UrlConf
+
+instance HasCodec UrlConf where
+  codec =
+    dimapCodec dec enc
+      $ disjointEitherCodec valCodec
+      $ disjointEitherCodec fromEnvCodec fromParamsCodec
+    where
+      valCodec = codec
+      fromParamsCodec = AC.object "UrlConfFromParams" $ requiredField' "connection_parameters"
+
+      dec (Left w) = UrlValue w
+      dec (Right (Left wEnv)) = UrlFromEnv wEnv
+      dec (Right (Right (Left wParams))) = UrlFromParams wParams
+      dec (Right (Right (Right wPath))) = UrlDynamicFromFile wPath
+
+      enc (UrlValue w) = Left w
+      enc (UrlFromEnv wEnv) = Right $ Left wEnv
+      enc (UrlFromParams wParams) = Right $ Right $ Left wParams
+      enc (UrlDynamicFromFile wPath) = Right $ Right $ Right wPath
 
 instance ToJSON UrlConf where
-  toJSON (UrlValue w)      = toJSON w
-  toJSON (UrlFromEnv wEnv) = object ["from_env" .= wEnv ]
+  toJSON (UrlValue w) = toJSON w
+  toJSON (UrlFromEnv wEnv) = object ["from_env" .= wEnv]
+  toJSON (UrlFromParams wParams) = object ["connection_parameters" .= wParams]
+  toJSON (UrlDynamicFromFile wPath) = object ["dynamic_from_file" .= wPath]
 
 instance FromJSON UrlConf where
-  parseJSON (Object o) = UrlFromEnv <$> o .: "from_env"
+  parseJSON (Object o) = do
+    mFromEnv <- (fmap . fmap) UrlFromEnv (o .:? "from_env")
+    mDynamicFromFile <- (fmap . fmap) UrlDynamicFromFile (o .:? "dynamic_from_file")
+    mFromParams <- (fmap . fmap) UrlFromParams (o .:? "connection_parameters")
+    case (mFromEnv, mFromParams, mDynamicFromFile) of
+      (Just fromEnv, Nothing, Nothing) -> pure fromEnv
+      (Nothing, Just fromParams, Nothing) -> pure fromParams
+      (Nothing, Nothing, Just dynamicFromFile) -> pure dynamicFromFile
+      (Nothing, Nothing, Nothing) -> fail $ commonJSONParseErrorMessage "Either "
+      (_, _, _) -> fail $ commonJSONParseErrorMessage "Only one of "
+    where
+      -- NOTE(Sam): Maybe this could be put with other string manipulation utils
+      -- helper to apply `dquote` for values of type `String`
+      dquoteStr :: String -> String
+      dquoteStr = T.unpack . dquote . T.pack
+
+      -- helper for formatting error messages within this instance
+      commonJSONParseErrorMessage :: String -> String
+      commonJSONParseErrorMessage strToBePrepended =
+        strToBePrepended
+          <> dquoteStr "from_env"
+          <> " or "
+          <> dquoteStr "connection_parameters"
+          <> " should be provided"
   parseJSON t@(String _) =
     case (fromJSON t) of
-      Error s   -> fail s
+      Error s -> fail s
       Success a -> pure $ UrlValue a
-  parseJSON _          = fail "one of string or object must be provided for url/webhook"
+  parseJSON _ = fail "one of string or object must be provided for url/webhook"
 
-resolveUrlConf
-  :: MonadError QErr m => Env.Environment -> UrlConf -> m Text
+getConnOptionsFromConnParams :: PGConnectionParams -> PG.ConnOptions
+getConnOptionsFromConnParams PGConnectionParams {..} =
+  PG.ConnOptions
+    { connHost = T.unpack _pgcpHost,
+      connUser = T.unpack _pgcpUsername,
+      connPort = _pgcpPort,
+      connDatabase = T.unpack _pgcpDatabase,
+      connPassword = T.unpack $ fromMaybe "" _pgcpPassword,
+      connOptions = Nothing
+    }
+
+-- | Construct a Postgres connection URI as a String from 'PGConnectionParams'.
+--
+-- NOTE: This function takes care to properly escape all URI components, as
+-- Postgres requires that a connection URI is percent-encoded if it includes
+-- symbols with "special meaning".
+--
+-- See the @libpq@ documentation for details: https://www.postgresql.org/docs/13/libpq-connect.html#id-1.7.3.8.3.6
+getPGConnectionStringFromParams :: PGConnectionParams -> String
+getPGConnectionStringFromParams PGConnectionParams {..} =
+  let uriAuth =
+        rectifyAuth
+          $ URIAuth
+            { uriUserInfo = getURIAuthUserInfo _pgcpUsername _pgcpPassword,
+              uriRegName = unpackEscape _pgcpHost,
+              uriPort = show _pgcpPort
+            }
+      pgConnectionURI =
+        rectify
+          $ URI
+            { uriScheme = "postgresql",
+              uriAuthority = Just uriAuth,
+              uriPath = "/" <> unpackEscape _pgcpDatabase,
+              uriQuery = "",
+              uriFragment = ""
+            }
+   in uriToString id pgConnectionURI $ "" -- NOTE: this is done because uriToString returns a value of type ShowS
+  where
+    -- Helper to manage proper escaping in URI components.
+    unpackEscape = escapeURIString isUnescapedInURIComponent . T.unpack
+
+    -- Construct the 'URIAuth' 'uriUserInfo' component string from a username
+    -- and optional password provided by 'PGConnectionParams'.
+    getURIAuthUserInfo :: Text -> Maybe Text -> String
+    getURIAuthUserInfo username mPassword = case mPassword of
+      Nothing -> unpackEscape username
+      Just password -> unpackEscape username <> ":" <> unpackEscape password
+
+-- | NOTE: Because hasura admins are not necessarily trusted to be able to read
+-- arbitrary files on the machine running the server, we insist the file path
+-- supplied by the hasura admin be validated against an acceptable prefix
+-- (set only by an env var,  presumably only by someone with privileges to
+-- deploy).
+--
+-- Altering the value of HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX after
+-- adding a dynamic source can result in inconsistent metadata.
+resolveUrlConf :: (MonadIO m, MonadError QErr m) => Env.Environment -> UrlConf -> m PG.ConnDetails
 resolveUrlConf env = \case
-  UrlValue v        -> unResolvedWebhook <$> resolveWebhook env v
-  UrlFromEnv envVar -> getEnv env envVar
+  UrlValue v -> toURI . unResolvedWebhook <$> resolveWebhook env v
+  UrlFromEnv envVar -> toURI <$> getEnv env envVar
+  UrlFromParams connParams ->
+    pure . toURI . T.pack $ getPGConnectionStringFromParams connParams
+  UrlDynamicFromFile fpathDirty -> do
+    fpath <- case Env.lookupEnv env "HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX" of
+      Nothing -> throw400 PermissionError $ "dynamic_from_file file path requires that the HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX environment variable be set and non-empty"
+      -- Since this might be an accidental misconfiguration:
+      Just "" -> throw400 PermissionError $ "dynamic_from_file file path requires that the HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX environment variable be non-empty"
+      -- Canonicalize the supplied (untrusted) file path, in an
+      -- attempt to prevent escapes (like `..`).  canonicalize both
+      -- path  and allowed prefix, so that matching is robust.
+      Just allowedPrefixNonCanon -> do
+        allowedPrefixCanon <- liftIO $ canonicalizePath allowedPrefixNonCanon
+        fpathDirtyCanon <- liftIO $ canonicalizePath fpathDirty
+        if allowedPrefixCanon `isPrefixOf` fpathDirtyCanon
+          then pure fpathDirty
+          else -- I guess we'll avoid leaking info here too...
+            throw400 PermissionError $ "The supplied dynamic_from_file file path, when canonicalized, does not match the allowed prefix set by your administrator via the HASURA_GRAPHQL_DYNAMIC_SECRETS_ALLOWED_PATH_PREFIX environment variable"
+    pure $ PG.CDDynamicDatabaseURI fpath
+  where
+    toURI = PG.CDDatabaseURI . txtToBs
 
-getEnv :: QErrM m => Env.Environment -> T.Text -> m T.Text
+getEnv :: (QErrM m) => Env.Environment -> Text -> m Text
 getEnv env k = do
-  let mEnv = Env.lookupEnv env (T.unpack k)
-  case mEnv of
-    Nothing     -> throw400 NotFound $ "environment variable '" <> k <> "' not set"
-    Just envVal -> return (T.pack envVal)
+  let eitherEnv = getEnvEither env k
+  onLeft
+    eitherEnv
+    (\_ -> throw400 NotFound $ "environment variable '" <> k <> "' not set")
+
+-- This is similar to `getEnv` but it doesn't fail when the env var is invalid
+getEnvEither :: Env.Environment -> Text -> Either Text Text
+getEnvEither env k =
+  case Env.lookupEnv env (T.unpack k) of
+    Nothing -> Left k
+    Just envVal -> Right (T.pack envVal)
+
+-- | Various user-controlled configuration for metrics used by Pro
+data MetricsConfig = MetricsConfig
+  { -- | should the query-variables be logged and analyzed for metrics
+    _mcAnalyzeQueryVariables :: Bool,
+    -- | should the response-body be analyzed for empty and null responses
+    _mcAnalyzeResponseBody :: Bool
+  }
+  deriving (Show, Eq, Generic)
+
+instance HasCodec MetricsConfig where
+  codec =
+    AC.object "MetricsConfig"
+      $ MetricsConfig
+      <$> requiredField' "analyze_query_variables"
+      AC..= _mcAnalyzeQueryVariables
+        <*> requiredField' "analyze_response_body"
+      AC..= _mcAnalyzeResponseBody
+
+instance FromJSON MetricsConfig where
+  parseJSON = J.withObject "MetricsConfig" $ \o -> do
+    _mcAnalyzeQueryVariables <- o .: "analyze_query_variables"
+    _mcAnalyzeResponseBody <- o .: "analyze_response_body"
+    pure MetricsConfig {..}
+
+instance ToJSON MetricsConfig where
+  toJSON MetricsConfig {..} =
+    J.object
+      [ "analyze_query_variables" .= _mcAnalyzeQueryVariables,
+        "analyze_response_body" .= _mcAnalyzeResponseBody
+      ]
+
+emptyMetricsConfig :: MetricsConfig
+emptyMetricsConfig = MetricsConfig False False
+
+data Comment
+  = -- | Automatically generate a comment (derive it from DB comments, or a sensible default describing the source of the data)
+    Automatic
+  | -- | The user's explicitly provided comment, or explicitly no comment (ie. leave it blank, do not autogenerate one)
+    Explicit (Maybe NonEmptyText)
+  deriving (Eq, Show, Generic)
+
+instance NFData Comment
+
+instance Hashable Comment
+
+instance HasCodec Comment where
+  codec = dimapCodec dec enc (codec @(Maybe Text))
+    where
+      dec Nothing = Automatic
+      dec (Just text) = Explicit $ mkNonEmptyText text
+
+      enc Automatic = Nothing
+      enc (Explicit (Just text)) = Just (toTxt text)
+      enc (Explicit Nothing) = Just ""
+
+instance FromJSON Comment where
+  parseJSON = \case
+    Null -> pure Automatic
+    String text -> pure . Explicit $ mkNonEmptyText text
+    val -> prependFailure "parsing Comment failed, " (typeMismatch "String or Null" val)
+
+instance ToJSON Comment where
+  toJSON Automatic = Null
+  toJSON (Explicit (Just value)) = String (toTxt value)
+  toJSON (Explicit Nothing) = String ""
+
+commentToMaybeText :: Comment -> Maybe Text
+commentToMaybeText Automatic = Nothing
+commentToMaybeText (Explicit Nothing) = Just ""
+commentToMaybeText (Explicit (Just val)) = Just (toTxt val)
+
+commentFromMaybeText :: Maybe Text -> Comment
+commentFromMaybeText Nothing = Automatic
+commentFromMaybeText (Just val) = Explicit $ mkNonEmptyText val
+
+-- | We use the following type, after we resolve the env var.
+-- | This will store both the env var name and the resolved value.
+data EnvRecord a = EnvRecord
+  { _envVarName :: Text,
+    _envVarValue :: a
+  }
+  deriving (Show, Eq, Generic)
+
+instance (NFData a) => NFData (EnvRecord a)
+
+instance (Hashable a) => Hashable (EnvRecord a)
+
+instance ToJSON (EnvRecord a) where
+  toJSON (EnvRecord envVar _envValue) = object ["env_var" .= envVar]
+
+instance (FromJSON a) => FromJSON (EnvRecord a)
+
+data ApolloFederationVersion = V1 deriving (Show, Eq, Generic)
+
+instance HasCodec ApolloFederationVersion where
+  codec = stringConstCodec [(V1, "v1")]
+
+instance ToJSON ApolloFederationVersion where
+  toJSON V1 = J.String "v1"
+
+instance FromJSON ApolloFederationVersion where
+  parseJSON = withText "ApolloFederationVersion"
+    $ \case
+      "v1" -> pure V1
+      _ -> fail "enable takes the version of apollo federation. Supported value is v1 only."
+
+instance NFData ApolloFederationVersion
+
+data ApolloFederationConfig = ApolloFederationConfig
+  { enable :: ApolloFederationVersion
+  }
+  deriving (Show, Eq, Generic)
+
+instance HasCodec ApolloFederationConfig where
+  codec =
+    AC.object "ApolloFederationConfig"
+      $ ApolloFederationConfig
+      <$> requiredField "enable" enableDoc
+      AC..= enable
+    where
+      enableDoc = "enable takes the version of apollo federation. Supported value is v1 only."
+
+instance ToJSON ApolloFederationConfig
+
+instance FromJSON ApolloFederationConfig
+
+instance NFData ApolloFederationConfig
+
+isApolloFedV1enabled :: Maybe ApolloFederationConfig -> Bool
+isApolloFedV1enabled = isJust
+
+-- | Type to indicate if the SQL trigger should be enabled
+--   when data is inserted into a table through replication.
+data TriggerOnReplication
+  = TOREnableTrigger
+  | TORDisableTrigger
+  deriving (Show, Eq, Generic)
+
+instance NFData TriggerOnReplication
+
+instance HasCodec TriggerOnReplication where
+  codec = boolConstCodec TOREnableTrigger TORDisableTrigger
+
+instance FromJSON TriggerOnReplication where
+  parseJSON = withBool "TriggerOnReplication" $ \case
+    True -> pure TOREnableTrigger
+    False -> pure TORDisableTrigger
+
+instance ToJSON TriggerOnReplication where
+  toJSON = \case
+    TOREnableTrigger -> Bool True
+    TORDisableTrigger -> Bool False
+
+--------------------------------------------------------------------------------
+-- metadata
+
+-- | Metadata representation of a generic remote relationship, regardless of the
+-- source: all sources use this same agnostic definition. The internal
+-- definition field is where we differentiate between different targets.
+--
+-- TODO: This needs to be moved to an appropriate module, maybe something
+-- like Hasura.RemoteRelationships.Metadata.
+data RemoteRelationshipG definition = RemoteRelationship
+  { _rrName :: RelName,
+    _rrDefinition :: definition
+  }
+  deriving (Show, Eq, Generic)
+
+instance (ToJSON definition) => ToJSON (RemoteRelationshipG definition) where
+  toJSON RemoteRelationship {..} =
+    J.object
+      [ "name" .= _rrName,
+        "definition" .= _rrDefinition
+      ]
+
+rrName :: Lens (RemoteRelationshipG def) (RemoteRelationshipG def) RelName RelName
+rrName = Lens.lens _rrName (\rrg a -> rrg {_rrName = a})
+
+rrDefinition :: Lens (RemoteRelationshipG def) (RemoteRelationshipG def') def def'
+rrDefinition = Lens.lens _rrDefinition (\rrg a -> rrg {_rrDefinition = a})
+
+remoteRelationshipCodec ::
+  forall definition.
+  (Typeable definition) =>
+  JSONCodec definition ->
+  JSONCodec (RemoteRelationshipG definition)
+remoteRelationshipCodec definitionCodec =
+  AC.object ("RemoteRelationship_" <> typeableName @definition)
+    $ RemoteRelationship
+    <$> requiredField' "name"
+    AC..= _rrName
+      <*> requiredFieldWith' "definition" definitionCodec
+    AC..= _rrDefinition

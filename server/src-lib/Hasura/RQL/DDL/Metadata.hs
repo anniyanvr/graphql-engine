@@ -1,463 +1,693 @@
-{-# LANGUAGE RecordWildCards #-}
 module Hasura.RQL.DDL.Metadata
-  ( runReplaceMetadata
-  , runExportMetadata
-  , fetchMetadataFromHdbTables
-  , runClearMetadata
-  , runReloadMetadata
-  , runDumpInternalState
-  , runGetInconsistentMetadata
-  , runDropInconsistentMetadata
+  ( runReplaceMetadata,
+    runReplaceMetadataV2,
+    runExportMetadata,
+    runExportMetadataV2,
+    runClearMetadata,
+    runReloadMetadata,
+    runDumpInternalState,
+    runGetInconsistentMetadata,
+    runDropInconsistentMetadata,
+    runGetCatalogState,
+    runSetCatalogState,
+    runTestWebhookTransform,
+    runSetMetricsConfig,
+    runRemoveMetricsConfig,
+    module Hasura.RQL.DDL.Metadata.Types,
+  )
+where
 
-  , module Hasura.RQL.DDL.Metadata.Types
-  ) where
+import Control.Lens (to, (.~), (^.), (^?))
+import Control.Monad.Trans.Control (MonadBaseControl)
+import Data.Aeson qualified as J
+import Data.Aeson.Ordered qualified as AO
+import Data.Attoparsec.Text qualified as AT
+import Data.Bifunctor (first)
+import Data.Bitraversable
+import Data.ByteString.Lazy qualified as BL
+import Data.CaseInsensitive qualified as CI
+import Data.Environment qualified as Env
+import Data.Has (Has, getter)
+import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.InsOrd.Extended qualified as InsOrdHashMap
+import Data.HashSet qualified as HS
+import Data.List qualified as L
+import Data.List.Extended qualified as L
+import Data.Map.Strict qualified as Map
+import Data.SerializableBlob qualified as SB
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.Text.Extended (dquoteList, (<<>))
+import Hasura.Base.Error
+import Hasura.EncJSON
+import Hasura.Eventing.Backend (BackendEventTrigger (..))
+import Hasura.Function.API
+import Hasura.Logging qualified as HL
+import Hasura.LogicalModel.API
+import Hasura.LogicalModelResolver.Lenses (_LMIInlineLogicalModel)
+import Hasura.Metadata.Class
+import Hasura.NativeQuery.API
+import Hasura.NativeQuery.Lenses (nqmReturns)
+import Hasura.Prelude hiding (first)
+import Hasura.RQL.DDL.Action
+import Hasura.RQL.DDL.ApiLimit
+import Hasura.RQL.DDL.ComputedField
+import Hasura.RQL.DDL.CustomTypes
+import Hasura.RQL.DDL.Endpoint
+import Hasura.RQL.DDL.EventTrigger
+import Hasura.RQL.DDL.InheritedRoles
+import Hasura.RQL.DDL.Metadata.Types
+import Hasura.RQL.DDL.Permission
+import Hasura.RQL.DDL.Relationship
+import Hasura.RQL.DDL.RemoteRelationship
+import Hasura.RQL.DDL.ScheduledTrigger
+import Hasura.RQL.DDL.Schema
+import Hasura.RQL.DDL.Schema.Source
+import Hasura.RQL.DDL.Warnings
+import Hasura.RQL.DDL.Webhook.Transform
+import Hasura.RQL.Types.Allowlist
+import Hasura.RQL.Types.ApiLimit
+import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType (BackendType (..))
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.Endpoint
+import Hasura.RQL.Types.EventTrigger
+import Hasura.RQL.Types.EventTrigger qualified as ET
+import Hasura.RQL.Types.Metadata
+import Hasura.RQL.Types.Metadata.Backend
+import Hasura.RQL.Types.Metadata.Object
+import Hasura.RQL.Types.OpenTelemetry
+import Hasura.RQL.Types.QueryCollection
+import Hasura.RQL.Types.ScheduledTrigger
+import Hasura.RQL.Types.SchemaCache
+import Hasura.RQL.Types.SchemaCache.Build
+import Hasura.RQL.Types.Source (unsafeSourceInfo)
+import Hasura.RQL.Types.SourceCustomization
+import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.SQL.BackendMap qualified as BackendMap
+import Hasura.Server.Logging (MetadataLog (..))
+import Hasura.Server.Types (MonadGetPolicies (..))
+import Hasura.StoredProcedure.API (dropStoredProcedureInMetadata)
+import Network.HTTP.Client.Transformable qualified as HTTP
+import Network.Types.Extended
 
-import           Hasura.Prelude
+-- | Helper function to run the post drop source hook
+postDropSourceHookHelper ::
+  ( MonadError QErr m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadReader r m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadWarnings m
+  ) =>
+  SchemaCache ->
+  SourceName ->
+  AB.AnyBackend SourceMetadata ->
+  m ()
+postDropSourceHookHelper oldSchemaCache sourceName sourceMetadataBackend = do
+  logger :: (HL.Logger HL.Hasura) <- asks getter
 
-import qualified Data.Aeson.Ordered                 as AO
-import qualified Data.HashMap.Strict                as HM
-import qualified Data.HashMap.Strict.InsOrd         as HMIns
-import qualified Data.HashSet                       as HS
-import qualified Data.HashSet.InsOrd                as HSIns
-import qualified Data.List                          as L
-import qualified Database.PG.Query                  as Q
+  AB.dispatchAnyBackend @BackendMetadata sourceMetadataBackend \(oldSourceMetadata :: SourceMetadata b) -> do
+    let sourceInfoMaybe = unsafeSourceInfo @b =<< HashMap.lookup sourceName (scSources oldSchemaCache)
+    case sourceInfoMaybe of
+      Nothing -> do
+        unless (null (getTriggersMap oldSourceMetadata)) do
+          let message =
+                "Could not cleanup the source '"
+                  <> sourceName
+                  <<> "' while dropping it from the graphql-engine as it is inconsistent."
+                  <> " Please consider cleaning the resources created by the graphql engine,"
+                  <> " refer https://hasura.io/docs/latest/graphql/core/event-triggers/remove-event-triggers/#clean-footprints-manually"
+          HL.unLogger logger $ MetadataLog HL.LevelWarn message J.Null
+          warn $ MetadataWarning WCSourceCleanupFailed (MOSource sourceName) message
+      Just sourceInfo -> runPostDropSourceHook defaultSource sourceInfo
 
-import           Control.Lens                       hiding ((.=))
-import           Data.Aeson
-
-import qualified Hasura.RQL.DDL.Action              as Action
-import qualified Hasura.RQL.DDL.ComputedField       as ComputedField
-import qualified Hasura.RQL.DDL.CustomTypes         as CustomTypes
-import qualified Hasura.RQL.DDL.Permission          as Permission
-import qualified Hasura.RQL.DDL.QueryCollection     as Collection
-import qualified Hasura.RQL.DDL.Relationship        as Relationship
-import qualified Hasura.RQL.DDL.RemoteRelationship  as RemoteRelationship
-import qualified Hasura.RQL.DDL.Schema              as Schema
-
-import           Hasura.Backends.Postgres.SQL.Types
-import           Hasura.EncJSON
-import           Hasura.RQL.DDL.ComputedField       (dropComputedFieldFromCatalog)
-import           Hasura.RQL.DDL.EventTrigger        (delEventTriggerFromCatalog,
-                                                     replaceEventTriggersInCatalog)
-import           Hasura.RQL.DDL.Metadata.Types
-import           Hasura.RQL.DDL.Permission.Internal (dropPermFromCatalog)
-import           Hasura.RQL.DDL.RemoteSchema        (addRemoteSchemaToCatalog,
-                                                     removeRemoteSchemaFromCatalog)
-import           Hasura.RQL.DDL.ScheduledTrigger    (addCronTriggerToCatalog,
-                                                     deleteCronTriggerFromCatalog)
-import           Hasura.RQL.DDL.Schema.Catalog      (saveTableToCatalog)
-import           Hasura.RQL.Types
-
--- | Purge all user-defined metadata; metadata with is_system_defined = false
-clearUserMetadata :: MonadTx m => m ()
-clearUserMetadata = liftTx $ Q.catchE defaultTxErrorHandler $ do
-  -- Note: we don’t drop event triggers here because we update them a different
-  -- way; see Note [Diff-and-patch event triggers on replace] in Hasura.RQL.DDL.EventTrigger.
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_function WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_permission WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_relationship WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_computed_field" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_remote_relationship" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_table WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.remote_schemas" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_allowlist" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_query_collection WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_custom_types" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_action_permission" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_action WHERE is_system_defined <> 'true'" () False
-  Q.unitQ "DELETE FROM hdb_catalog.hdb_cron_triggers WHERE include_in_metadata" () False
-
-runClearMetadata
-  :: (MonadTx m, CacheRWM m)
-  => ClearMetadata -> m EncJSON
+runClearMetadata ::
+  forall m r.
+  ( MonadIO m,
+    CacheRWM m,
+    MetadataM m,
+    MonadMetadataStorage m,
+    MonadBaseControl IO m,
+    MonadReader r m,
+    MonadError QErr m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadEventLogCleanup m,
+    MonadGetPolicies m
+  ) =>
+  ClearMetadata ->
+  m EncJSON
 runClearMetadata _ = do
-  clearUserMetadata
-  replaceEventTriggersInCatalog mempty
-  buildSchemaCacheStrict
-  return successMsg
+  metadata <- getMetadata
 
-saveMetadata :: (MonadTx m, HasSystemDefined m) => Metadata -> m ()
-saveMetadata (Metadata tables functions
-              schemas collections allowlist customTypes actions cronTriggers) = do
+  oldSchemaCache <- askSchemaCache
 
-  withPathK "tables" $ do
-    indexedForM_ tables $ \TableMetadata{..} -> do
-      -- Save table
-      saveTableToCatalog _tmTable _tmIsEnum _tmConfiguration
+  -- We can infer whether the server is started with `--database-url` option
+  -- (or corresponding env variable) by checking the existence of @'defaultSource'
+  -- in current metadata.
+  let maybeDefaultSourceMetadata = metadata ^? metaSources . ix defaultSource . to unBackendSourceMetadata
+      emptyMetadata' = case maybeDefaultSourceMetadata of
+        Nothing -> emptyMetadata
+        Just exists ->
+          -- If default postgres source is defined, we need to set metadata
+          -- which contains only default source without any tables and functions.
+          let emptyDefaultSource =
+                AB.dispatchAnyBackend @Backend exists \(s :: SourceMetadata b) ->
+                  BackendSourceMetadata
+                    $ AB.mkAnyBackend @b
+                    $ SourceMetadata
+                      @b
+                      defaultSource
+                      (_smKind @b s)
+                      mempty
+                      mempty
+                      mempty
+                      mempty
+                      mempty
+                      (_smConfiguration @b s)
+                      Nothing
+                      emptySourceCustomization
+                      Nothing
+           in emptyMetadata
+                & metaSources
+                %~ InsOrdHashMap.insert defaultSource emptyDefaultSource
 
-      -- Relationships
-      withPathK "object_relationships" $
-        indexedForM_ _tmObjectRelationships $ \objRel ->
-        Relationship.insertRelationshipToCatalog _tmTable ObjRel objRel
-      withPathK "array_relationships" $
-        indexedForM_ _tmArrayRelationships $ \arrRel ->
-        Relationship.insertRelationshipToCatalog _tmTable ArrRel arrRel
+  (_inconsistencies, replaceMetadataWarnings) <- runMetadataWarnings . runReplaceMetadataV2' . ReplaceMetadataV2 NoAllowInconsistentMetadata AllowWarnings $ RMWithSources emptyMetadata'
 
-      -- Computed Fields
-      withPathK "computed_fields" $
-        indexedForM_ _tmComputedFields $
-          \(ComputedFieldMetadata name definition comment) ->
-            ComputedField.addComputedFieldToCatalog $
-              ComputedField.AddComputedField _tmTable name definition comment
+  -- Cleanup the default source explicitly because in the `runReplaceMetadataV1`
+  -- call it won't be considered as a dropped source because we artificially add
+  -- a empty source metadata for the default source metadata. So, for `runReplaceMetadataV1`
+  -- the default source will not be a dropped source and hence there will not be
+  -- any post drop source action on it. So, here we expicitly do the post drop source
+  -- action for the default source, if it existed in the metadata.
+  (_, dropSourceHookWarnings) <- runMetadataWarnings $ for maybeDefaultSourceMetadata $ postDropSourceHookHelper oldSchemaCache defaultSource
+  pure $ mkSuccessResponseWithWarnings (replaceMetadataWarnings <> dropSourceHookWarnings)
 
-      -- Remote Relationships
-      withPathK "remote_relationships" $
-        indexedForM_ _tmRemoteRelationships $
-          \(RemoteRelationshipMetadata name def) -> do
-             let RemoteRelationshipDef rs hf rf = def
-             liftTx $ RemoteRelationship.persistRemoteRelationship $
-                      RemoteRelationship name _tmTable hf rs rf
+{- Note [Cleanup for dropped triggers]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+There was an issue (https://github.com/hasura/graphql-engine/issues/5461)
+fixed (via https://github.com/hasura/graphql-engine/pull/6137) related to
+event triggers while replacing metadata in the catalog prior to metadata
+separation. The metadata separation solves the issue naturally, since the
+'hdb_catalog.event_triggers' table is no more in use and new/updated event
+triggers are processed in building schema cache. But we need to drop the
+database trigger and archive events for dropped event triggers. This is handled
+explicitly in @'runReplaceMetadata' function.
+-}
 
-      -- Permissions
-      withPathK "insert_permissions" $ processPerms _tmTable _tmInsertPermissions
-      withPathK "select_permissions" $ processPerms _tmTable _tmSelectPermissions
-      withPathK "update_permissions" $ processPerms _tmTable _tmUpdatePermissions
-      withPathK "delete_permissions" $ processPerms _tmTable _tmDeletePermissions
+-- | Replace the 'current metadata' with the 'new metadata'
+-- The 'new metadata' might come via the 'Import Metadata' in console
+runReplaceMetadata ::
+  ( CacheRWM m,
+    MetadataM m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadMetadataStorage m,
+    MonadReader r m,
+    MonadError QErr m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadEventLogCleanup m,
+    MonadGetPolicies m
+  ) =>
+  ReplaceMetadata ->
+  m EncJSON
+runReplaceMetadata = \case
+  RMReplaceMetadataV1 v1args -> runReplaceMetadataV1 v1args
+  RMReplaceMetadataV2 v2args -> runReplaceMetadataV2 v2args
 
-    -- Event triggers
-    let allEventTriggers = HMIns.elems tables & map \table ->
-          (_tmTable table,) <$> HMIns.toHashMap (_tmEventTriggers table)
-    replaceEventTriggersInCatalog $ HM.unions allEventTriggers
+runReplaceMetadataV1 ::
+  ( CacheRWM m,
+    MetadataM m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadMetadataStorage m,
+    MonadReader r m,
+    MonadError QErr m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadEventLogCleanup m,
+    MonadGetPolicies m
+  ) =>
+  ReplaceMetadataV1 ->
+  m EncJSON
+runReplaceMetadataV1 =
+  ((mkSuccessResponseWithWarnings . snd) <$>) . runMetadataWarnings . runReplaceMetadataV2' . ReplaceMetadataV2 NoAllowInconsistentMetadata AllowWarnings
 
-  -- sql functions
-  withPathK "functions" $ indexedForM_ functions $
-    \(FunctionMetadata function config) -> Schema.saveFunctionToCatalog function config
+runReplaceMetadataV2 ::
+  forall m r.
+  ( CacheRWM m,
+    MetadataM m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadMetadataStorage m,
+    MonadReader r m,
+    MonadError QErr m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadEventLogCleanup m,
+    MonadGetPolicies m
+  ) =>
+  ReplaceMetadataV2 ->
+  m EncJSON
+runReplaceMetadataV2 replaceMetadataArgs = do
+  (inconsistentObjects, metadataWarnings) <- runMetadataWarnings $ (runReplaceMetadataV2' replaceMetadataArgs)
+  case _rmv2AllowWarningss replaceMetadataArgs of
+    AllowWarnings -> pure ()
+    DisallowWarnings ->
+      unless (null metadataWarnings)
+        $ throw400WithDetail (CustomCode "metadata-warnings") "failed due to metadata warnings" (J.toJSON metadataWarnings)
+  pure $ encJFromJValue $ formatInconsistentObjs inconsistentObjects metadataWarnings
 
-  -- query collections
-  systemDefined <- askSystemDefined
-  withPathK "query_collections" $
-    indexedForM_ collections $ \c -> liftTx $ Collection.addCollectionToCatalog c systemDefined
+runReplaceMetadataV2' ::
+  forall m r.
+  ( CacheRWM m,
+    MetadataM m,
+    MonadIO m,
+    MonadBaseControl IO m,
+    MonadMetadataStorage m,
+    MonadReader r m,
+    MonadError QErr m,
+    Has (HL.Logger HL.Hasura) r,
+    MonadEventLogCleanup m,
+    MonadWarnings m,
+    MonadGetPolicies m
+  ) =>
+  ReplaceMetadataV2 ->
+  m [InconsistentMetadata]
+runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
+  logger :: (HL.Logger HL.Hasura) <- asks getter
+  -- we drop all the future cron trigger events before inserting the new metadata
+  -- and re-populating future cron events below
+  let introspectionDisabledRoles =
+        case _rmv2Metadata of
+          RMWithSources m -> _metaSetGraphqlIntrospectionOptions m
+          RMWithoutSources _ -> mempty
+  oldMetadata <- getMetadata
+  oldSchemaCache <- askSchemaCache
 
-  -- allow list
-  withPathK "allowlist" $
-    indexedForM_ allowlist $ \(Collection.CollectionReq name) ->
-      liftTx $ Collection.addCollectionToAllowlistCatalog name
+  (cronTriggersMetadata, cronTriggersToBeAdded) <- processCronTriggers oldMetadata
 
-  -- remote schemas
-  withPathK "remote_schemas" $
-    indexedMapM_ (liftTx . addRemoteSchemaToCatalog) schemas
+  metadata <- case _rmv2Metadata of
+    RMWithSources m -> pure $ m {_metaCronTriggers = cronTriggersMetadata}
+    RMWithoutSources MetadataNoSources {..} -> do
+      let maybeDefaultSourceMetadata = oldMetadata ^? metaSources . ix defaultSource . toSourceMetadata
+      defaultSourceMetadata <-
+        onNothing maybeDefaultSourceMetadata
+          $ throw400 NotSupported "cannot import metadata without sources since no default source is defined"
+      let newDefaultSourceMetadata =
+            BackendSourceMetadata
+              $ AB.mkAnyBackend
+                defaultSourceMetadata
+                  { _smTables = _mnsTables,
+                    _smFunctions = _mnsFunctions
+                  }
+      pure
+        $ Metadata
+          (InsOrdHashMap.singleton defaultSource newDefaultSourceMetadata)
+          _mnsRemoteSchemas
+          _mnsQueryCollections
+          _mnsAllowlist
+          _mnsCustomTypes
+          _mnsActions
+          cronTriggersMetadata
+          (_metaRestEndpoints oldMetadata)
+          emptyApiLimit
+          emptyMetricsConfig
+          mempty
+          introspectionDisabledRoles
+          emptyNetwork
+          mempty
+          emptyOpenTelemetryConfig
 
-  -- custom types
-  withPathK "custom_types" $
-    CustomTypes.persistCustomTypes customTypes
+  let (oldSources, newSources) = (_metaSources oldMetadata, _metaSources metadata)
 
-  -- cron triggers
-  withPathK "cron_triggers" $
-    indexedForM_ cronTriggers $ \ct -> liftTx $
-    addCronTriggerToCatalog ct
+  -- Check for duplicate and illegal trigger names in the new source metadata.
+  -- Illegal names are hard-rejected (matching create_event_trigger) rather than
+  -- merely warned about, because the name is interpolated into the SQL of the
+  -- generated trigger function. This validates every trigger name present in
+  -- the incoming metadata, old or new, so upgrading with a pre-existing illegal
+  -- name already in storage keeps working -- decoding stored metadata doesn't
+  -- go through this check, only a fresh replace_metadata call does -- but
+  -- re-submitting that same metadata will fail until the name is fixed.
+  for_ (InsOrdHashMap.toList newSources) $ \(_source, newBackendSourceMetadata) ->
+    AB.dispatchAnyBackend @BackendEventTrigger (unBackendSourceMetadata newBackendSourceMetadata) \(newSourceMetadata :: SourceMetadata b) -> do
+      let sourceTableAndTriggers = getSourceTableAndTriggers newSourceMetadata
+          newTriggerNames = map snd sourceTableAndTriggers
+          duplicateTriggerNamesInNewMetadata = newTriggerNames \\ (L.uniques newTriggerNames)
+      unless (null duplicateTriggerNamesInNewMetadata) $ do
+        throw400 NotSupported ("Event trigger with duplicate names not allowed: " <> dquoteList (map triggerNameToTxt duplicateTriggerNamesInNewMetadata))
+      for_ sourceTableAndTriggers $ \(_, triggerName) -> do
+        when (isIllegalTriggerName triggerName)
+          $ throw400 NotSupported "Starting in v2.50 only alphanumeric and underscore and hyphens allowed for name"
+        unless (T.length (triggerNameToTxt triggerName) <= maxTriggerNameLength)
+          $ throw400 NotSupported "event trigger name can be at most 42 characters"
 
-  -- actions
-  withPathK "actions" $
-    indexedForM_ actions $ \action -> do
-      let createAction =
-            CreateAction (_amName action) (_amDefinition action) (_amComment action)
-      Action.persistCreateAction createAction
-      withPathK "permissions" $
-        indexedForM_ (_amPermissions action) $ \permission -> do
-          let createActionPermission = CreateActionPermission (_amName action)
-                                       (_apmRole permission) Nothing (_apmComment permission)
-          Action.persistCreateActionPermission createActionPermission
+  -- Throw a warning if the API time limit exceeds the system limit
+  let userTimeLimitAPILimit = _lGlobal <$> _alTimeLimit (_metaApiLimits metadata)
+  warningResultEither <- compareTimeLimitWith userTimeLimitAPILimit
+  case warningResultEither of
+    Left warning -> warn warning
+    Right _ -> pure ()
 
-  where
-    processPerms tableName perms = indexedForM_ perms $ Permission.addPermP2 tableName
-
-runReplaceMetadata
-  :: ( MonadTx m
-     , CacheRWM m
-     , HasSystemDefined m
-     )
-  => Metadata -> m EncJSON
-runReplaceMetadata metadata = do
-  clearUserMetadata
-  saveMetadata metadata
-  buildSchemaCacheStrict
-  pure successMsg
-
-fetchMetadataFromHdbTables :: MonadTx m => m Metadata
-fetchMetadataFromHdbTables = liftTx do
-  tables <- Q.catchE defaultTxErrorHandler fetchTables
-  let tableMetaMap = HMIns.fromList . flip map tables $
-        \(schema, name, isEnum, maybeConfig) ->
-          let qualifiedName = QualifiedObject schema name
-              configuration = maybe emptyTableConfig Q.getAltJ maybeConfig
-          in (qualifiedName, mkTableMeta qualifiedName isEnum configuration)
-
-  -- Fetch all the relationships
-  relationships <- Q.catchE defaultTxErrorHandler fetchRelationships
-
-  objRelDefs <- mkRelDefs ObjRel relationships
-  arrRelDefs <- mkRelDefs ArrRel relationships
-
-  -- Fetch all the permissions
-  permissions <- Q.catchE defaultTxErrorHandler fetchPermissions
-
-  -- Parse all the permissions
-  insPermDefs <- mkPermDefs PTInsert permissions
-  selPermDefs <- mkPermDefs PTSelect permissions
-  updPermDefs <- mkPermDefs PTUpdate permissions
-  delPermDefs <- mkPermDefs PTDelete permissions
-
-  -- Fetch all event triggers
-  eventTriggers <- Q.catchE defaultTxErrorHandler fetchEventTriggers
-  triggerMetaDefs <- mkTriggerMetaDefs eventTriggers
-
-  -- Fetch all computed fields
-  computedFields <- fetchComputedFields
-
-  -- Fetch all remote relationships
-  remoteRelationships <- Q.catchE defaultTxErrorHandler fetchRemoteRelationships
-
-  let (_, fullTableMetaMap) = flip runState tableMetaMap $ do
-        modMetaMap tmObjectRelationships _rdName objRelDefs
-        modMetaMap tmArrayRelationships _rdName arrRelDefs
-        modMetaMap tmInsertPermissions _pdRole insPermDefs
-        modMetaMap tmSelectPermissions _pdRole selPermDefs
-        modMetaMap tmUpdatePermissions _pdRole updPermDefs
-        modMetaMap tmDeletePermissions _pdRole delPermDefs
-        modMetaMap tmEventTriggers etcName triggerMetaDefs
-        modMetaMap tmComputedFields _cfmName computedFields
-        modMetaMap tmRemoteRelationships _rrmName remoteRelationships
-
-  -- fetch all functions
-  functions <- Q.catchE defaultTxErrorHandler fetchFunctions
-
-  -- fetch all remote schemas
-  remoteSchemas <- oMapFromL _arsqName <$> fetchRemoteSchemas
-
-  -- fetch all collections
-  collections <- oMapFromL _ccName <$> fetchCollections
-
-  -- fetch allow list
-  allowlist <- HSIns.fromList . map CollectionReq <$> fetchAllowlists
-
-  customTypes <- fetchCustomTypes
-
-  -- fetch actions
-  actions <- oMapFromL _amName <$> fetchActions
-
-  cronTriggers <- fetchCronTriggers
-
-  pure $ Metadata fullTableMetaMap functions remoteSchemas collections
-                  allowlist customTypes actions cronTriggers
-
-  where
-    modMetaMap l f xs = do
-      st <- get
-      put $ foldl' (\b (qt, dfn) -> b & at qt._Just.l %~ HMIns.insert (f dfn) dfn) st xs
-
-    mkPermDefs pt = mapM permRowToDef . filter (\pr -> pr ^. _4 == pt)
-
-    permRowToDef (sn, tn, rn, _, Q.AltJ pDef, mComment) = do
-      perm <- decodeValue pDef
-      return (QualifiedObject sn tn,  PermDef rn perm mComment)
-
-    mkRelDefs rt = mapM relRowToDef . filter (\rr -> rr ^. _4 == rt)
-
-    relRowToDef (sn, tn, rn, _, Q.AltJ rDef, mComment) = do
-      using <- decodeValue rDef
-      return (QualifiedObject sn tn, RelDef rn using mComment)
-
-    mkTriggerMetaDefs = mapM trigRowToDef
-
-    trigRowToDef (sn, tn, Q.AltJ configuration) = do
-      conf <- decodeValue configuration
-      return (QualifiedObject sn tn, conf::EventTriggerConf)
-
-    fetchTables =
-      Q.listQ [Q.sql|
-                SELECT table_schema, table_name, is_enum, configuration::json
-                FROM hdb_catalog.hdb_table
-                 WHERE is_system_defined = 'false'
-                ORDER BY table_schema ASC, table_name ASC
-                    |] () False
-
-    fetchRelationships =
-      Q.listQ [Q.sql|
-                SELECT table_schema, table_name, rel_name, rel_type, rel_def::json, comment
-                  FROM hdb_catalog.hdb_relationship
-                 WHERE is_system_defined = 'false'
-                ORDER BY table_schema ASC, table_name ASC, rel_name ASC
-                    |] () False
-
-    fetchPermissions =
-      Q.listQ [Q.sql|
-                SELECT table_schema, table_name, role_name, perm_type, perm_def::json, comment
-                  FROM hdb_catalog.hdb_permission
-                 WHERE is_system_defined = 'false'
-                ORDER BY table_schema ASC, table_name ASC, role_name ASC, perm_type ASC
-                    |] () False
-
-    fetchEventTriggers =
-     Q.listQ [Q.sql|
-              SELECT e.schema_name, e.table_name, e.configuration::json
-               FROM hdb_catalog.event_triggers e
-              ORDER BY e.schema_name ASC, e.table_name ASC, e.name ASC
-              |] () False
-
-    fetchFunctions = do
-      l <- Q.listQ [Q.sql|
-                SELECT function_schema, function_name, configuration::json
-                FROM hdb_catalog.hdb_function
-                WHERE is_system_defined = 'false'
-                ORDER BY function_schema ASC, function_name ASC
-                    |] () False
-      pure $ oMapFromL _fmFunction $
-        flip map l $ \(sn, fn, Q.AltJ config) ->
-                       FunctionMetadata (QualifiedObject sn fn) config
-
-    fetchRemoteSchemas =
-      map fromRow <$> Q.listQE defaultTxErrorHandler
-        [Q.sql|
-         SELECT name, definition, comment
-           FROM hdb_catalog.remote_schemas
-         ORDER BY name ASC
-         |] () True
-      where
-        fromRow (name, Q.AltJ def, comment) =
-          AddRemoteSchemaQuery name def comment
-
-
-    fetchCollections =
-      map fromRow <$> Q.listQE defaultTxErrorHandler [Q.sql|
-               SELECT collection_name, collection_defn::json, comment
-                 FROM hdb_catalog.hdb_query_collection
-                 WHERE is_system_defined = 'false'
-               ORDER BY collection_name ASC
-              |] () False
-      where
-        fromRow (name, Q.AltJ defn, mComment) =
-          CreateCollection name defn mComment
-
-    fetchAllowlists = map runIdentity <$>
-      Q.listQE defaultTxErrorHandler [Q.sql|
-          SELECT collection_name
-            FROM hdb_catalog.hdb_allowlist
-          ORDER BY collection_name ASC
-         |] () False
-
-    fetchComputedFields = do
-      r <- Q.listQE defaultTxErrorHandler [Q.sql|
-              SELECT table_schema, table_name, computed_field_name,
-                     definition::json, comment
-                FROM hdb_catalog.hdb_computed_field
-             |] () False
-      pure $ flip map r $ \(schema, table, name, Q.AltJ definition, comment) ->
-                          ( QualifiedObject schema table
-                          , ComputedFieldMetadata name definition comment
-                          )
-
-    fetchCronTriggers =
-      (oMapFromL ctName . map uncurryCronTrigger)
-              <$> Q.listQE defaultTxErrorHandler
-      [Q.sql|
-       SELECT ct.name, ct.webhook_conf, ct.cron_schedule, ct.payload,
-             ct.retry_conf, ct.header_conf, ct.include_in_metadata, ct.comment
-        FROM hdb_catalog.hdb_cron_triggers ct
-        WHERE include_in_metadata
-      |] () False
-      where
-        uncurryCronTrigger
-          (name, webhook, schedule, payload, retryConfig, headerConfig, includeMetadata, comment) =
-          CronTriggerMetadata
-          { ctName = name,
-            ctWebhook = Q.getAltJ webhook,
-            ctSchedule = schedule,
-            ctPayload = Q.getAltJ <$> payload,
-            ctRetryConf = Q.getAltJ retryConfig,
-            ctHeaders = Q.getAltJ headerConfig,
-            ctIncludeInMetadata = includeMetadata,
-            ctComment = comment
+  let cacheInvalidations =
+        CacheInvalidations
+          { ciMetadata = False,
+            ciRemoteSchemas = mempty,
+            ciSources = HS.fromList $ InsOrdHashMap.keys newSources,
+            ciDataConnectors = mempty
           }
 
-    fetchCustomTypes :: Q.TxE QErr CustomTypes
-    fetchCustomTypes =
-      Q.getAltJ . runIdentity . Q.getRow <$>
-      Q.rawQE defaultTxErrorHandler [Q.sql|
-         select coalesce((select custom_types::json from hdb_catalog.hdb_custom_types), '{}'::json)
-         |] [] False
+  -- put the new metadata in the state managed by the `MetadataT`
+  putMetadata metadata
 
-    fetchActions =
-      Q.getAltJ . runIdentity . Q.getRow <$> Q.rawQE defaultTxErrorHandler [Q.sql|
-        select
-          coalesce(
-            json_agg(
-              json_build_object(
-                'name', a.action_name,
-                'definition', a.action_defn,
-                'comment', a.comment,
-                'permissions', ap.permissions
-              ) order by a.action_name asc
-            ),
-            '[]'
+  -- build the schema cache with the new metadata
+  buildSchemaCacheWithInvalidations cacheInvalidations mempty
+
+  case _rmv2AllowInconsistentMetadata of
+    AllowInconsistentMetadata -> pure ()
+    NoAllowInconsistentMetadata -> throwOnInconsistencies
+
+  -- populate future cron events for all the new cron triggers that are imported
+  for_ cronTriggersToBeAdded $ \CronTriggerMetadata {..} ->
+    populateInitialCronTriggerEvents ctSchedule ctName
+
+  -- See Note [Cleanup for dropped triggers]
+  dropSourceSQLTriggers logger oldSchemaCache (_metaSources oldMetadata) (_metaSources metadata)
+
+  newSchemaCache <- askSchemaCache
+
+  updateTriggerCleanupSchedules logger (_metaSources oldMetadata) (_metaSources metadata) newSchemaCache
+    >>= (`onLeft` throwError)
+
+  let droppedSources = InsOrdHashMap.difference oldSources newSources
+
+  -- Clean up the sources that are not present in the new metadata
+  for_ (InsOrdHashMap.toList droppedSources) $ \(oldSource, oldSourceBackendMetadata) ->
+    postDropSourceHookHelper oldSchemaCache oldSource (unBackendSourceMetadata oldSourceBackendMetadata)
+
+  pure . scInconsistentObjs $ newSchemaCache
+  where
+    {- Note [Cron triggers behaviour with replace metadata]
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    When the metadata is replaced, we delete only the cron triggers
+    that were deleted, instead of deleting all the old cron triggers (which
+    existed in the metadata before it was replaced) and inserting all the
+    new cron triggers. This is done this way, because when a cron trigger is
+    dropped, the cron events associated with it will also be dropped from the DB
+    and when a new cron trigger is added, new cron events are generated by the
+    graphql-engine. So, this way we only delete and insert the data which has been changed.
+
+    The cron triggers that were deleted is calculated by getting a diff
+    of the old cron triggers and the new cron triggers. Note that we don't just
+    check the name of the trigger to calculate the diff, the whole cron trigger
+    definition is considered in the calculation.
+
+    Note: Only cron triggers with `include_in_metadata` set to `true` can be updated/deleted
+    via the replace metadata API. Cron triggers with `include_in_metadata` can only be modified
+    via the `create_cron_trigger` and `delete_cron_trigger` APIs.
+
+    -}
+    processCronTriggers oldMetadata = do
+      let (oldCronTriggersIncludedInMetadata, oldCronTriggersNotIncludedInMetadata) =
+            InsOrdHashMap.partition ctIncludeInMetadata (_metaCronTriggers oldMetadata)
+          allNewCronTriggers =
+            case _rmv2Metadata of
+              RMWithoutSources m -> _mnsCronTriggers m
+              RMWithSources m -> _metaCronTriggers m
+          -- this function is intended to use with `HashMap.differenceWith`, it's used when two
+          -- equal keys are encountered, then the values are compared to calculate the diff.
+          -- see https://hackage.haskell.org/package/unordered-containers-0.2.14.0/docs/Data-HashMap-Internal.html#v:differenceWith
+          leftIfDifferent l r
+            | l == r = Nothing
+            | otherwise = Just l
+          cronTriggersToBeAdded =
+            HashMap.differenceWith
+              leftIfDifferent
+              (InsOrdHashMap.toHashMap allNewCronTriggers)
+              (InsOrdHashMap.toHashMap oldCronTriggersIncludedInMetadata)
+          cronTriggersToBeDropped =
+            HashMap.differenceWith
+              leftIfDifferent
+              (InsOrdHashMap.toHashMap oldCronTriggersIncludedInMetadata)
+              (InsOrdHashMap.toHashMap allNewCronTriggers)
+      liftEitherM $ dropFutureCronEvents $ MetadataCronTriggers $ HashMap.keys cronTriggersToBeDropped
+      cronTriggers <- do
+        -- traverse over the new cron triggers and check if any of them
+        -- already exists as a cron trigger with "included_in_metadata: false"
+        for_ allNewCronTriggers $ \ct ->
+          when (ctName ct `InsOrdHashMap.member` oldCronTriggersNotIncludedInMetadata)
+            $ throw400 AlreadyExists
+            $ "cron trigger with name "
+            <> ctName ct
+            <<> " already exists as a cron trigger with \"included_in_metadata\" as false"
+        -- we add the old cron triggers with included_in_metadata set to false with the
+        -- newly added cron triggers
+        pure $ allNewCronTriggers <> oldCronTriggersNotIncludedInMetadata
+      pure $ (cronTriggers, cronTriggersToBeAdded)
+
+    dropSourceSQLTriggers ::
+      HL.Logger HL.Hasura ->
+      SchemaCache ->
+      InsOrdHashMap SourceName BackendSourceMetadata ->
+      InsOrdHashMap SourceName BackendSourceMetadata ->
+      m ()
+    dropSourceSQLTriggers (HL.Logger logger) oldSchemaCache oldSources newSources = do
+      -- NOTE: the current implementation of this function has an edge case.
+      -- The edge case is that when a `SourceA` which contained some event triggers
+      -- is modified to point to a new database, this function will try to drop the
+      -- SQL triggers of the dropped event triggers on the new database which doesn't exist.
+      -- In the current implementation, this doesn't throw an error because the trigger is dropped
+      -- using `DROP IF EXISTS..` meaning this silently fails without throwing an error.
+      for_ (InsOrdHashMap.toList newSources) $ \(source, newBackendSourceMetadata) -> do
+        for_ (InsOrdHashMap.lookup source oldSources) $ \oldBackendSourceMetadata ->
+          compose source (unBackendSourceMetadata newBackendSourceMetadata) (unBackendSourceMetadata oldBackendSourceMetadata) \(newSourceMetadata :: SourceMetadata b) -> do
+            dispatch oldBackendSourceMetadata \oldSourceMetadata -> do
+              let oldTriggersMap = getTriggersMap oldSourceMetadata
+                  newTriggersMap = getTriggersMap newSourceMetadata
+                  -- Get table mapping for new triggers (we use schema cache for old tables)
+                  newTriggerTableMap = getTriggerTableMap newSourceMetadata
+                  droppedEventTriggers = InsOrdHashMap.keys $ oldTriggersMap `InsOrdHashMap.difference` newTriggersMap
+                  retainedNewTriggers = newTriggersMap `InsOrdHashMap.intersection` oldTriggersMap
+                  -- Helper to check if a retained trigger has moved to a different table
+                  -- We compare the old table (from schema cache) with the new table (from new metadata)
+                  hasTriggerMoved :: TriggerName -> Bool
+                  hasTriggerMoved triggerName =
+                    case (getTableNameFromTrigger @b oldSchemaCache source triggerName, InsOrdHashMap.lookup triggerName newTriggerTableMap) of
+                      (Just oldTable, Just newTable) -> oldTable /= newTable
+                      _ -> False
+                  catcher e@QErr {qeCode}
+                    | qeCode == Unexpected = pure () -- NOTE: This information should be returned by the inconsistent_metadata response, so doesn't need additional logging.
+                    | otherwise = throwError e -- rethrow other errors
+                  sourceObjID =
+                    MOSource source
+
+              -- This will swallow Unexpected exceptions for sources if allow_inconsistent_metadata is enabled
+              -- This should be ok since if the sources are already missing from the cache then they should
+              -- not need to be removed.
+              --
+              -- TODO: Determine if any errors should be thrown from askSourceConfig at all if the errors are just being discarded
+              return
+                $ flip catchError catcher do
+                  sourceConfigMaybe <- askSourceConfigMaybe @b source
+                  case sourceConfigMaybe of
+                    Nothing ->
+                      unless (null oldTriggersMap) do
+                        let message =
+                              "Could not drop SQL triggers present in the source '"
+                                <> source
+                                <<> "' as it is inconsistent."
+                                <> " While creating an event trigger, Hasura creates SQL triggers on the table."
+                                <> " Please refer https://hasura.io/docs/latest/graphql/core/event-triggers/remove-event-triggers/#clean-up-event-trigger-footprints-manually "
+                                <> " to delete the sql triggers from the database manually."
+                                <> " For more details, please refer https://hasura.io/docs/latest/graphql/core/event-triggers/index.html "
+                        warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                        logger $ MetadataLog HL.LevelWarn message J.Null
+                    Just sourceConfig -> do
+                      -- First, drop triggers that have been completely removed
+                      for_ droppedEventTriggers \triggerName -> do
+                        -- TODO: The `tableName` parameter could be computed while building
+                        -- the triggers map and avoid the cache lookup.
+                        case getTableNameFromTrigger @b oldSchemaCache source triggerName of
+                          Nothing -> do
+                            let message = sqlTriggerError triggerName
+                            warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                            logger $ MetadataLog HL.LevelWarn message J.Null
+                          Just tableName ->
+                            dropTriggerAndArchiveEvents @b sourceConfig triggerName tableName
+
+                      -- Second, drop triggers that have moved to a different table
+                      -- We need to drop the SQL triggers from the OLD table, but NOT archive the events
+                      -- (since the trigger still exists, just on a different table)
+                      for_ (filter hasTriggerMoved $ InsOrdHashMap.keys retainedNewTriggers) \triggerName -> do
+                        case getTableNameFromTrigger @b oldSchemaCache source triggerName of
+                          Nothing -> do
+                            let message = sqlTriggerError triggerName
+                            warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                            logger $ MetadataLog HL.LevelWarn message J.Null
+                          Just oldTableName ->
+                            -- Drop all operations from the old table since the trigger is moving
+                            dropDanglingSQLTrigger @b sourceConfig triggerName oldTableName (HS.fromList [INSERT, UPDATE, ET.DELETE])
+
+                      -- Third, handle retained triggers where operations were dropped (but table stayed same)
+                      for_ (InsOrdHashMap.toList retainedNewTriggers) $ \(retainedNewTriggerName, retainedNewTriggerConf) ->
+                        -- Skip triggers that moved tables (already handled above)
+                        unless (hasTriggerMoved retainedNewTriggerName)
+                          $ case InsOrdHashMap.lookup retainedNewTriggerName oldTriggersMap of
+                            Nothing -> do
+                              let message = sqlTriggerError retainedNewTriggerName
+                              warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                              logger $ MetadataLog HL.LevelWarn message J.Null
+                            Just oldTriggerConf -> do
+                              let newTriggerOps = etcDefinition retainedNewTriggerConf
+                                  oldTriggerOps = etcDefinition oldTriggerConf
+                                  isDroppedOp old new = isJust old && isNothing new
+                                  droppedOps =
+                                    [ (bool Nothing (Just INSERT) (isDroppedOp (tdInsert oldTriggerOps) (tdInsert newTriggerOps))),
+                                      (bool Nothing (Just UPDATE) (isDroppedOp (tdUpdate oldTriggerOps) (tdUpdate newTriggerOps))),
+                                      (bool Nothing (Just ET.DELETE) (isDroppedOp (tdDelete oldTriggerOps) (tdDelete newTriggerOps)))
+                                    ]
+                              case getTableNameFromTrigger @b oldSchemaCache source retainedNewTriggerName of
+                                Nothing -> do
+                                  let message = sqlTriggerError retainedNewTriggerName
+                                  warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                                  logger $ MetadataLog HL.LevelWarn message J.Null
+                                Just tableName ->
+                                  dropDanglingSQLTrigger @b sourceConfig retainedNewTriggerName tableName (HS.fromList $ catMaybes droppedOps)
+      where
+        compose ::
+          SourceName ->
+          AB.AnyBackend i ->
+          AB.AnyBackend i ->
+          (forall b. (BackendEventTrigger b) => i b -> i b -> m ()) ->
+          m ()
+        compose sourceName x y f = AB.composeAnyBackend @BackendEventTrigger f x y (logger $ HL.UnstructuredLog HL.LevelInfo $ SB.fromText $ "Event trigger clean up couldn't be done on the source " <> sourceName <<> " because it has changed its type")
+
+        sqlTriggerError :: TriggerName -> Text
+        sqlTriggerError triggerName =
+          ( "Could not drop SQL triggers associated with event trigger '"
+              <> triggerName
+              <<> "'. While creating an event trigger, Hasura creates SQL triggers on the table."
+              <> " Please refer https://hasura.io/docs/latest/graphql/core/event-triggers/remove-event-triggers/#clean-up-event-trigger-footprints-manually "
+              <> " to delete the sql triggers from the database manually."
+              <> " For more details, please refer https://hasura.io/docs/latest/graphql/core/event-triggers/index.html "
           )
-        from
-          hdb_catalog.hdb_action as a
-          left outer join lateral (
-            select
-              coalesce(
-                json_agg(
-                  json_build_object(
-                    'role', ap.role_name,
-                    'comment', ap.comment
-                  ) order by ap.role_name asc
-                ),
-                '[]'
-              ) as permissions
-            from
-              hdb_catalog.hdb_action_permission ap
-            where
-              ap.action_name = a.action_name
-          ) ap on true;
-                            |] [] False
 
-    fetchRemoteRelationships = do
-      r <- Q.listQ [Q.sql|
-                SELECT table_schema, table_name,
-                       remote_relationship_name, definition::json
-                FROM hdb_catalog.hdb_remote_relationship
-             |] () False
-      pure $ flip map r $ \(schema, table, name, Q.AltJ definition) ->
-                          ( QualifiedObject schema table
-                          , RemoteRelationshipMetadata name definition
-                          )
+    dispatch (BackendSourceMetadata bs) = AB.dispatchAnyBackend @BackendEventTrigger bs
 
-runExportMetadata
-  :: (QErrM m, MonadTx m)
-  => ExportMetadata -> m EncJSON
-runExportMetadata _ =
-  AO.toEncJSON . metadataToOrdJSON <$> fetchMetadataFromHdbTables
+-- | Only includes the cron triggers with `included_in_metadata` set to `True`
+processCronTriggersMetadata :: Metadata -> Metadata
+processCronTriggersMetadata metadata =
+  let cronTriggersIncludedInMetadata = InsOrdHashMap.filter ctIncludeInMetadata $ _metaCronTriggers metadata
+   in metadata {_metaCronTriggers = cronTriggersIncludedInMetadata}
 
-runReloadMetadata :: (QErrM m, CacheRWM m) => ReloadMetadata -> m EncJSON
-runReloadMetadata (ReloadMetadata reloadRemoteSchemas) = do
-  sc <- askSchemaCache
-  let remoteSchemaInvalidations =
-        if reloadRemoteSchemas then HS.fromList (getAllRemoteSchemas sc) else mempty
-  buildSchemaCacheWithOptions CatalogUpdate CacheInvalidations
-                                            { ciMetadata = True
-                                            , ciRemoteSchemas = remoteSchemaInvalidations
-                                            }
-  pure successMsg
+runExportMetadata ::
+  forall m.
+  (QErrM m, MetadataM m) =>
+  ExportMetadata ->
+  m EncJSON
+runExportMetadata ExportMetadata {} =
+  encJFromOrderedValue . metadataToOrdJSON <$> (processCronTriggersMetadata <$> getMetadata)
 
-runDumpInternalState
-  :: (QErrM m, CacheRM m)
-  => DumpInternalState -> m EncJSON
+runExportMetadataV2 ::
+  forall m.
+  (QErrM m, MetadataM m) =>
+  MetadataResourceVersion ->
+  ExportMetadata ->
+  m EncJSON
+runExportMetadataV2 currentResourceVersion ExportMetadata {} = do
+  exportMetadata <- processCronTriggersMetadata <$> getMetadata
+  pure
+    $ encJFromOrderedValue
+    $ AO.object
+      [ ("resource_version", AO.toOrdered currentResourceVersion),
+        ("metadata", metadataToOrdJSON exportMetadata)
+      ]
+
+runReloadMetadata :: (QErrM m, CacheRWM m, MetadataM m) => ReloadMetadata -> m EncJSON
+runReloadMetadata (ReloadMetadata reloadRemoteSchemas reloadSources reloadRecreateEventTriggers reloadDataConnectors) = do
+  metadata <- getMetadata
+  let allSources = HS.fromList $ InsOrdHashMap.keys $ _metaSources metadata
+      allRemoteSchemas = HS.fromList $ InsOrdHashMap.keys $ _metaRemoteSchemas metadata
+      allDataConnectors =
+        maybe mempty (HS.fromList . Map.keys . unBackendConfigWrapper)
+          $ BackendMap.lookup @'DataConnector
+          $ _metaBackendConfigs metadata
+      checkRemoteSchema name =
+        unless (HS.member name allRemoteSchemas)
+          $ throw400 NotExists
+          $ "Remote schema with name "
+          <> name
+          <<> " not found in metadata"
+      checkSource name =
+        unless (HS.member name allSources)
+          $ throw400 NotExists
+          $ "Source with name "
+          <> name
+          <<> " not found in metadata"
+      checkDataConnector name =
+        unless (HS.member name allDataConnectors)
+          $ throw400 NotExists
+          $ "Data connector with name "
+          <> name
+          <<> " not found in metadata"
+
+  remoteSchemaInvalidations <- case reloadRemoteSchemas of
+    RSReloadAll -> pure allRemoteSchemas
+    RSReloadList l -> mapM_ checkRemoteSchema l *> pure l
+  sourcesInvalidations <- case reloadSources of
+    RSReloadAll -> pure allSources
+    RSReloadList l -> mapM_ checkSource l *> pure l
+  recreateEventTriggersSources <- case reloadRecreateEventTriggers of
+    RSReloadAll -> pure allSources
+    RSReloadList l -> mapM_ checkSource l *> pure l
+  dataConnectorInvalidations <- case reloadDataConnectors of
+    RSReloadAll -> pure allDataConnectors
+    RSReloadList l -> mapM_ checkDataConnector l *> pure l
+
+  let cacheInvalidations =
+        CacheInvalidations
+          { ciMetadata = True,
+            ciRemoteSchemas = remoteSchemaInvalidations,
+            ciSources = sourcesInvalidations,
+            ciDataConnectors = dataConnectorInvalidations
+          }
+
+  buildSchemaCacheWithOptions (CatalogUpdate $ Just recreateEventTriggersSources) cacheInvalidations metadata Nothing
+  inconsObjs <- scInconsistentObjs <$> askSchemaCache
+  pure
+    . encJFromJValue
+    . J.object
+    $ [ "message" J..= ("success" :: Text),
+        "is_consistent" J..= null inconsObjs
+      ]
+    <> ["inconsistent_objects" J..= inconsObjs | not (null inconsObjs)]
+
+runDumpInternalState ::
+  (QErrM m, CacheRM m) =>
+  DumpInternalState ->
+  m EncJSON
 runDumpInternalState _ =
   encJFromJValue <$> askSchemaCache
 
-
-runGetInconsistentMetadata
-  :: (QErrM m, CacheRM m)
-  => GetInconsistentMetadata -> m EncJSON
+runGetInconsistentMetadata ::
+  (QErrM m, CacheRM m) =>
+  GetInconsistentMetadata ->
+  m EncJSON
 runGetInconsistentMetadata _ = do
   inconsObjs <- scInconsistentObjs <$> askSchemaCache
-  return $ encJFromJValue $ object
-                [ "is_consistent" .= null inconsObjs
-                , "inconsistent_objects" .= inconsObjs
-                ]
+  return $ encJFromJValue $ formatInconsistentObjs inconsObjs mempty
 
-runDropInconsistentMetadata
-  :: (QErrM m, CacheRWM m, MonadTx m)
-  => DropInconsistentMetadata -> m EncJSON
+formatInconsistentObjs :: [InconsistentMetadata] -> MetadataWarnings -> J.Value
+formatInconsistentObjs inconsObjs metadataWarnings =
+  J.object
+    $ [ "is_consistent" J..= null inconsObjs,
+        "inconsistent_objects" J..= inconsObjs
+      ]
+    <> ["warnings" J..= metadataWarnings | not (null metadataWarnings)]
+
+runDropInconsistentMetadata ::
+  (QErrM m, CacheRWM m, MetadataM m) =>
+  DropInconsistentMetadata ->
+  m EncJSON
 runDropInconsistentMetadata _ = do
   sc <- askSchemaCache
   let inconsSchObjs = L.nub . concatMap imObjectIds $ scInconsistentObjs sc
@@ -465,21 +695,249 @@ runDropInconsistentMetadata _ = do
   -- list of inconsistent objects, so reverse the list to start with dependents first. This is not
   -- perfect — a completely accurate solution would require performing a topological sort — but it
   -- seems to work well enough for now.
-  mapM_ purgeMetadataObj (reverse inconsSchObjs)
-  buildSchemaCacheStrict
+  MetadataModifier {..} <- execWriterT $ mapM_ (tell . purgeMetadataObj) (reverse inconsSchObjs)
+  metadata <- getMetadata
+  putMetadata $ runMetadataModifier metadata
+  buildSchemaCache mempty
+  -- after building the schema cache, we need to check the inconsistent metadata, if any
+  -- are only those which are not droppable
+  newInconsistentObjects <- scInconsistentObjs <$> askSchemaCache
+  let droppableInconsistentObjects = filter droppableInconsistentMetadata newInconsistentObjects
+  unless (null droppableInconsistentObjects)
+    $ throwError
+      (err400 Unexpected "cannot continue due to new inconsistent metadata")
+        { qeInternal = Just $ ExtraInternal $ J.toJSON newInconsistentObjects
+        }
   return successMsg
 
-purgeMetadataObj :: MonadTx m => MetadataObjId -> m ()
-purgeMetadataObj = liftTx . \case
-  MOTable qt                               -> Schema.deleteTableFromCatalog qt
-  MOFunction qf                            -> Schema.delFunctionFromCatalog qf
-  MORemoteSchema rsn                       -> removeRemoteSchemaFromCatalog rsn
-  MOTableObj qt (MTORel rn _)              -> Relationship.delRelFromCatalog qt rn
-  MOTableObj qt (MTOPerm rn pt)            -> dropPermFromCatalog qt rn pt
-  MOTableObj _ (MTOTrigger trn)            -> delEventTriggerFromCatalog trn
-  MOTableObj qt (MTOComputedField ccn)     -> dropComputedFieldFromCatalog qt ccn
-  MOTableObj qt (MTORemoteRelationship rn) -> RemoteRelationship.delRemoteRelFromCatalog qt rn
-  MOCustomTypes                            -> CustomTypes.clearCustomTypes
-  MOAction action                          -> Action.deleteActionFromCatalog action Nothing
-  MOActionPermission action role           -> Action.deleteActionPermissionFromCatalog action role
-  MOCronTrigger ctName                     -> deleteCronTriggerFromCatalog ctName
+purgeMetadataObj :: MetadataObjId -> MetadataModifier
+purgeMetadataObj = \case
+  MOSource source -> MetadataModifier $ metaSources %~ InsOrdHashMap.delete source
+  MOSourceObjId source exists -> AB.dispatchAnyBackend @BackendMetadata exists $ handleSourceObj source
+  MORemoteSchema rsn -> dropRemoteSchemaInMetadata rsn
+  MORemoteSchemaPermissions rsName role -> dropRemoteSchemaPermissionInMetadata rsName role
+  MORemoteSchemaRemoteRelationship rsName typeName relName ->
+    dropRemoteSchemaRemoteRelationshipInMetadata rsName typeName relName
+  MOCustomTypes -> clearCustomTypesInMetadata
+  MOAction action -> dropActionInMetadata action -- Nothing
+  MOActionPermission action role -> dropActionPermissionInMetadata action role
+  MOCronTrigger ctName -> dropCronTriggerInMetadata ctName
+  MOEndpoint epName -> dropEndpointInMetadata epName
+  MOInheritedRole role -> dropInheritedRoleInMetadata role
+  MOQueryCollectionsQuery cName lq -> dropListedQueryFromQueryCollections cName lq
+  MODataConnectorAgent agentName ->
+    MetadataModifier
+      $ metaBackendConfigs
+      %~ BackendMap.modify @'DataConnector (BackendConfigWrapper . Map.delete agentName . unBackendConfigWrapper)
+  MOOpenTelemetry subobject ->
+    case subobject of
+      OtelSubobjectAll ->
+        MetadataModifier $ metaOpenTelemetryConfig .~ emptyOpenTelemetryConfig
+      OtelSubobjectExporterOtlp ->
+        MetadataModifier $ metaOpenTelemetryConfig . ocExporterOtlp .~ defaultOtelExporterConfig
+      OtelSubobjectBatchSpanProcessor ->
+        MetadataModifier $ metaOpenTelemetryConfig . ocBatchSpanProcessor .~ defaultOtelBatchSpanProcessorConfig
+  where
+    handleSourceObj :: forall b. (BackendMetadata b) => SourceName -> SourceMetadataObjId b -> MetadataModifier
+    handleSourceObj source = \case
+      SMOTable qt -> dropTableInMetadata @b source qt
+      SMOFunction qf -> dropFunctionInMetadata @b source qf
+      SMOFunctionPermission qf rn -> dropFunctionPermissionInMetadata @b source qf rn
+      SMONativeQuery nq -> dropNativeQueryInMetadata @b source nq
+      SMONativeQueryObj nativeQueryName nativeQueryMetadataObjId ->
+        MetadataModifier
+          $ nativeQueryMetadataSetter @b source nativeQueryName
+          %~ case nativeQueryMetadataObjId of
+            NQMORel rn _ -> dropNativeQueryRelationshipInMetadata rn
+      SMOStoredProcedure sp -> dropStoredProcedureInMetadata @b source sp
+      SMOLogicalModel lm -> dropLogicalModelInMetadata @b source lm
+      SMOLogicalModelObj (LMLLogicalModel logicalModelName) logicalModelMetadataObjId ->
+        MetadataModifier
+          $ logicalModelMetadataSetter @b source logicalModelName
+          %~ case logicalModelMetadataObjId of
+            LMMOPerm roleName permType ->
+              dropLogicalModelPermissionInMetadata roleName permType
+            LMMOReferencedLogicalModel _ -> id
+      SMOLogicalModelObj (LMLNativeQuery nativeQueryName) logicalModelMetadataObjId ->
+        MetadataModifier
+          $ nativeQueryMetadataSetter @b source nativeQueryName
+          . nqmReturns
+          . _LMIInlineLogicalModel
+          %~ case logicalModelMetadataObjId of
+            LMMOPerm roleName permType ->
+              dropInlineLogicalModelPermissionInMetadata roleName permType
+            LMMOReferencedLogicalModel _ -> id
+      SMOTableObj qt tableObj ->
+        MetadataModifier
+          $ tableMetadataSetter @b source qt
+          %~ case tableObj of
+            MTORel rn _ -> dropRelationshipInMetadata rn
+            MTOPerm rn pt -> dropPermissionInMetadata rn pt
+            MTOTrigger trn -> dropEventTriggerInMetadata trn
+            MTOComputedField ccn -> dropComputedFieldInMetadata ccn
+            MTORemoteRelationship rn -> dropRemoteRelationshipInMetadata rn
+
+    dropListedQueryFromQueryCollections :: CollectionName -> ListedQuery -> MetadataModifier
+    dropListedQueryFromQueryCollections cName lq = MetadataModifier $ removeAndCleanupMetadata
+      where
+        removeAndCleanupMetadata m =
+          let newQueryCollection = filteredCollection (_metaQueryCollections m)
+              -- QueryCollections = InsOrdHashMap CollectionName CreateCollection
+              filteredCollection :: QueryCollections -> QueryCollections
+              filteredCollection qc = InsOrdHashMap.filter (isNonEmptyCC) $ InsOrdHashMap.adjust (collectionModifier) (cName) qc
+
+              collectionModifier :: CreateCollection -> CreateCollection
+              collectionModifier cc@CreateCollection {..} =
+                cc
+                  { _ccDefinition =
+                      let oldQueries = _cdQueries _ccDefinition
+                       in _ccDefinition
+                            { _cdQueries = filter (/= lq) oldQueries
+                            }
+                  }
+
+              isNonEmptyCC :: CreateCollection -> Bool
+              isNonEmptyCC = not . null . _cdQueries . _ccDefinition
+
+              cleanupAllowList :: MetadataAllowlist -> MetadataAllowlist
+              cleanupAllowList = InsOrdHashMap.filterWithKey (\_ _ -> InsOrdHashMap.member cName newQueryCollection)
+
+              cleanupRESTEndpoints :: Endpoints -> Endpoints
+              cleanupRESTEndpoints endpoints = InsOrdHashMap.filter (not . isFaultyQuery . _edQuery . _ceDefinition) endpoints
+
+              isFaultyQuery :: QueryReference -> Bool
+              isFaultyQuery QueryReference {..} = _qrCollectionName == cName && _qrQueryName == (_lqName lq)
+           in m
+                { _metaQueryCollections = newQueryCollection,
+                  _metaAllowlist = cleanupAllowList (_metaAllowlist m),
+                  _metaRestEndpoints = cleanupRESTEndpoints (_metaRestEndpoints m)
+                }
+
+runGetCatalogState ::
+  (MonadMetadataStorage m, MonadError QErr m) => GetCatalogState -> m EncJSON
+runGetCatalogState _ =
+  encJFromJValue <$> liftEitherM fetchCatalogState
+
+runSetCatalogState ::
+  (MonadMetadataStorage m, MonadError QErr m) => SetCatalogState -> m EncJSON
+runSetCatalogState SetCatalogState {..} = do
+  liftEitherM $ updateCatalogState _scsType _scsState
+  pure successMsg
+
+runSetMetricsConfig ::
+  (MonadIO m, CacheRWM m, MetadataM m, MonadError QErr m) =>
+  MetricsConfig ->
+  m EncJSON
+runSetMetricsConfig mc = do
+  withNewInconsistentObjsCheck
+    $ buildSchemaCache
+    $ MetadataModifier
+    $ metaMetricsConfig
+    .~ mc
+  pure successMsg
+
+runRemoveMetricsConfig ::
+  (MonadIO m, CacheRWM m, MetadataM m, MonadError QErr m) =>
+  m EncJSON
+runRemoveMetricsConfig = do
+  withNewInconsistentObjsCheck
+    $ buildSchemaCache
+    $ MetadataModifier
+    $ metaMetricsConfig
+    .~ emptyMetricsConfig
+  pure successMsg
+
+data TestTransformError
+  = RequestInitializationError HTTP.HttpException
+  | RequestTransformationError HTTP.Request TransformErrorBundle
+
+runTestWebhookTransform ::
+  (QErrM m) =>
+  TestWebhookTransform ->
+  m EncJSON
+runTestWebhookTransform (TestWebhookTransform env headers urlE payload rt _ sv) = do
+  url <- case urlE of
+    URL url' -> interpolateFromEnv env url'
+    EnvVar var ->
+      let err = throwError $ err400 NotFound "Missing Env Var"
+       in maybe err (pure . T.pack) $ Env.lookupEnv env var
+
+  headers' <- traverse (traverse (fmap TE.encodeUtf8 . interpolateFromEnv env . TE.decodeUtf8)) headers
+
+  result <- runExceptT $ do
+    initReq <- hoistEither $ first RequestInitializationError $ HTTP.mkRequestEither url
+
+    let req = initReq & HTTP.body .~ HTTP.RequestBodyLBS (J.encode payload) & HTTP.headers .~ headers'
+        reqTransform = requestFields rt
+        engine = templateEngine rt
+        reqTransformCtx = fmap mkRequestContext $ mkReqTransformCtx url sv engine
+    hoistEither $ first (RequestTransformationError req) $ applyRequestTransform reqTransformCtx reqTransform req
+
+  case result of
+    Right transformed ->
+      packTransformResult $ Right transformed
+    Left (RequestTransformationError _ err) -> packTransformResult (Left err)
+    -- NOTE: In the following case we have failed before producing a valid request.
+    Left (RequestInitializationError err) ->
+      let errorBundle =
+            TransformErrorBundle
+              $ pure
+              $ J.object ["error_code" J..= J.String "Request Initialization Error", "message" J..= J.String (tshow err)]
+       in throw400WithDetail ValidationFailed "request transform validation failed" $ J.toJSON errorBundle
+
+interpolateFromEnv :: (MonadError QErr m) => Env.Environment -> Text -> m Text
+interpolateFromEnv env url =
+  case AT.parseOnly parseEnvTemplate url of
+    Left _ -> throwError $ err400 ParseFailed "Invalid Url Template"
+    Right xs ->
+      let lookup' var = maybe (Left var) (Right . T.pack) $ Env.lookupEnv env (T.unpack var)
+          result = traverse (fmap indistinct . bitraverse lookup' pure) xs
+          err e =
+            throwError
+              $ err400 NotFound
+              $ "Missing Env Var: "
+              <> e
+              <> ". For security reasons when testing request options real environment variable values are not available. Please enter a mock value for "
+              <> e
+              <> " in the Sample Env Variables list. See https://hasura.io/docs/latest/graphql/core/actions/rest-connectors/#action-transforms-sample-context"
+       in either err (pure . fold) result
+
+-- | Deserialize a JSON or X-WWW-URL-FORMENCODED body from an
+-- 'HTTP.Request' as 'J.Value'.
+decodeBody :: Maybe BL.ByteString -> J.Value
+decodeBody Nothing = J.Null
+decodeBody (Just bs) = fromMaybe J.Null $ jsonToValue bs <|> formUrlEncodedToValue bs
+
+-- | Attempt to encode a 'ByteString' as an Aeson 'Value'
+jsonToValue :: BL.ByteString -> Maybe J.Value
+jsonToValue bs = J.decode bs
+
+-- | Quote a 'ByteString' then attempt to encode it as a JSON
+-- String. This is necessary for 'x-www-url-formencoded' bodies. They
+-- are a list of key/value pairs encoded as a raw 'ByteString' with no
+-- quoting whereas JSON Strings must be quoted.
+formUrlEncodedToValue :: BL.ByteString -> Maybe J.Value
+formUrlEncodedToValue bs = J.decode ("\"" <> bs <> "\"")
+
+parseEnvTemplate :: AT.Parser [Either T.Text T.Text]
+parseEnvTemplate = AT.many1 $ pEnv <|> pLit <|> fmap Right "{"
+  where
+    pEnv = fmap (Left) $ "{{" *> AT.takeWhile1 (/= '}') <* "}}"
+    pLit = fmap Right $ AT.takeWhile1 (/= '{')
+
+indistinct :: Either a a -> a
+indistinct = either id id
+
+packTransformResult :: (MonadError QErr m) => Either TransformErrorBundle HTTP.Request -> m EncJSON
+packTransformResult = \case
+  Right req ->
+    pure
+      . encJFromJValue
+      $ J.object
+        [ "webhook_url" J..= (req ^. HTTP.url),
+          "method" J..= (req ^. HTTP.method),
+          "headers" J..= (first CI.foldedCase <$> (req ^. HTTP.headers)),
+          -- NOTE: We cannot decode IO based body types.
+          "body" J..= decodeBody (req ^? HTTP.body . HTTP._RequestBodyLBS)
+        ]
+  Left err -> throw400WithDetail ValidationFailed "request transform validation failed" $ J.toJSON err

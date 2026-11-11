@@ -1,0 +1,30 @@
+import { StoryObj, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
+import { FamiliaritySurveyTheme } from './FamiliaritySurveyTheme';
+import { mockFetchAllSurveysData } from '../../__mocks__/surveys.mock';
+
+export default {
+  title: 'features/Surveys/HasuraFamiliaritySurvey',
+  component: FamiliaritySurveyTheme,
+  decorators: [ReactQueryDecorator()],
+  // disable chromatic snapshots as chromatic will show diff on each build
+  // as the questions and options are randomly arranged on each render.
+  chromatic: { disableSnapshot: true },
+} as Meta<typeof FamiliaritySurveyTheme>;
+
+export const Base: StoryObj = {
+  render: () => (
+    <FamiliaritySurveyTheme
+      orderedSurveyQuestionData={
+        mockFetchAllSurveysData?.data?.survey_v2?.[2].survey_questions ?? []
+      }
+      handleSubmit={() => {
+        /* noop */
+      }}
+    />
+  ),
+
+  parameters: {
+    chromatic: { disableSnapshot: true },
+  },
+};

@@ -1,0 +1,35 @@
+{
+  "name": "console-ee",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/console-ee/src",
+  "projectType": "application",
+  "tags": ["scope:console", "type:app", "meta:legacy"],
+  "targets": {
+    "build-server-assets": {
+      "executor": "@hasura/internal-plugin:build-server-assets",
+      "inputs": ["{workspaceRoot}/dist/apps/console-ee/**"],
+      "outputs": ["{workspaceRoot}/dist/apps/server-assets-console-ee"],
+      "dependsOn": ["validate-javascript-bundle-output"]
+    },
+    "validate-javascript-bundle-output": {
+      "executor": "@hasura/internal-plugin:validate-javascript-bundle-output",
+      "inputs": ["{workspaceRoot}/dist/apps/console-ee/**"],
+      "dependsOn": ["build"]
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "fix": true,
+        "lintFilePatterns": ["apps/console-ee/**/*.{ts,tsx,js,jsx,json}"]
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "coverage/apps/console-ee"
+      }
+    }
+  }
+}

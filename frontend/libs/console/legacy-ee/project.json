@@ -1,0 +1,31 @@
+{
+  "name": "console-legacy-ee",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/console/legacy-ee/src",
+  "projectType": "library",
+  "tags": ["scope:console", "type:feature", "meta:legacy"],
+  "targets": {
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": ["libs/console/legacy-ee/**/*.{ts,tsx,js,jsx,json}"]
+      }
+    },
+    "lint-fix": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "fix": true,
+        "lintFilePatterns": ["libs/console/legacy-ee/**/*.{ts,tsx,js,jsx,json}"]
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "coverage/libs/console/legacy-ee"
+      }
+    }
+  }
+}

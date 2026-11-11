@@ -16,6 +16,8 @@ type MigrationStatus struct {
 
 	// Check if the migration is present on the local.
 	IsPresent bool `json:"source_status"`
+
+	IsDirty bool `json:"-"`
 }
 
 type Status struct {
@@ -43,6 +45,7 @@ func (i *Status) Append(m *MigrationStatus) (ok bool) {
 	}
 
 	i.buildIndex()
+
 	return true
 }
 
@@ -51,6 +54,7 @@ func (i *Status) buildIndex() {
 	for version := range i.Migrations {
 		i.Index = append(i.Index, version)
 	}
+
 	sort.Sort(i.Index)
 }
 
@@ -58,17 +62,8 @@ func (i *Status) Read(version uint64) (m *MigrationStatus, ok bool) {
 	if mx, ok := i.Migrations[version]; ok {
 		return mx, true
 	}
-	return nil, false
-}
 
-func (i *Status) findPos(version uint64) int {
-	if len(i.Index) > 0 {
-		ix := i.Index.Search(version)
-		if ix < len(i.Index) && i.Index[ix] == version {
-			return ix
-		}
-	}
-	return -1
+	return nil, false
 }
 
 type uint64Slice []uint64

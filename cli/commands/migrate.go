@@ -1,65 +1,127 @@
 package commands
 
 import (
+	stderrors "errors"
 	"fmt"
 
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/hasura/graphql-engine/cli/migrate"
-	mig "github.com/hasura/graphql-engine/cli/migrate/cmd"
-	"github.com/hasura/graphql-engine/cli/util"
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/hasura/graphql-engine/cli/v2/internal/hasura"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
+	"github.com/hasura/graphql-engine/cli/v2/internal/scripts"
+	"github.com/hasura/graphql-engine/cli/v2/migrate"
+	mig "github.com/hasura/graphql-engine/cli/v2/migrate/cmd"
+	_ "github.com/hasura/graphql-engine/cli/v2/migrate/database/hasuradb"
+	_ "github.com/hasura/graphql-engine/cli/v2/migrate/source/file"
+	"github.com/hasura/graphql-engine/cli/v2/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-
-	// Initialize migration drivers
-	_ "github.com/hasura/graphql-engine/cli/migrate/database/hasuradb"
-	_ "github.com/hasura/graphql-engine/cli/migrate/source/file"
 )
 
-// NewMigrateCmd returns the migrate command
+// NewMigrateCmd returns the migrate command.
 func NewMigrateCmd(ec *cli.ExecutionContext) *cobra.Command {
 	v := viper.New()
+	ec.Viper = v
 	migrateCmd := &cobra.Command{
-		Use:          "migrate",
-		Short:        "Manage migrations on the database",
+		Use:   "migrate",
+		Short: "Manage migrations on the database",
+		Long: `This command, when used with a collection of subcommands, allows you to manage migrations on the database.
+
+Further reading:
+- https://hasura.io/docs/latest/migrations-metadata-seeds/manage-migrations/
+`,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			op := genOpName(cmd, "PersistentPreRunE")
 			cmd.Root().PersistentPreRun(cmd, args)
+
 			ec.Viper = v
+
 			err := ec.Prepare()
 			if err != nil {
-				return err
+				return errors.E(op, err)
 			}
-			return ec.Validate()
+
+			if err := ec.Validate(); err != nil {
+				return errors.E(op, err)
+			}
+
+			return nil
 		},
 	}
-	migrateCmd.AddCommand(
-		newMigrateApplyCmd(ec),
-		newMigrateStatusCmd(ec),
-		newMigrateCreateCmd(ec),
-		newMigrateSquashCmd(ec),
-	)
 
 	f := migrateCmd.PersistentFlags()
+	f.StringVar(
+		&ec.Source.Name,
+		"database-name",
+		"",
+		"database on which operation should be applied",
+	)
 
 	f.String("endpoint", "", "http(s) endpoint for Hasura GraphQL Engine")
 	f.String("admin-secret", "", "admin secret for Hasura GraphQL Engine")
 	f.String("access-key", "", "access key for Hasura GraphQL Engine")
-	f.MarkDeprecated("access-key", "use --admin-secret instead")
-	f.Bool("insecure-skip-tls-verify", false, "skip TLS verification and disable cert checking (default: false)")
+
+	err := f.MarkDeprecated("access-key", "use --admin-secret instead")
+	if err != nil {
+		ec.Logger.WithError(err).Errorf("error while using a dependency library")
+	}
+
+	f.Bool(
+		"insecure-skip-tls-verify",
+		false,
+		"skip TLS verification and disable cert checking (default: false)",
+	)
 	f.String("certificate-authority", "", "path to a cert file for the certificate authority")
+	f.StringArrayVar(
+		&ec.HGEHeaderFlags,
+		"header",
+		nil,
+		`custom HTTP header to send with every request to Hasura GraphQL Engine, in "Name: value" form; repeatable. e.g. --header "Authorization: Bearer <token>"`,
+	)
+	f.Bool("disable-interactive", false, "disables interactive prompts (default: false)")
 
 	util.BindPFlag(v, "endpoint", f.Lookup("endpoint"))
 	util.BindPFlag(v, "admin_secret", f.Lookup("admin-secret"))
 	util.BindPFlag(v, "access_key", f.Lookup("access-key"))
 	util.BindPFlag(v, "insecure_skip_tls_verify", f.Lookup("insecure-skip-tls-verify"))
 	util.BindPFlag(v, "certificate_authority", f.Lookup("certificate-authority"))
+	util.BindPFlag(v, "disable_interactive", f.Lookup("disable-interactive"))
+
+	f.BoolVar(
+		&ec.DisableAutoStateMigration,
+		"disable-auto-state-migration",
+		false,
+		"after a config v3 update, disable automatically moving state from hdb_catalog.schema_migrations to catalog state",
+	)
+
+	err = f.MarkHidden("disable-auto-state-migration")
+	if err != nil {
+		ec.Logger.WithError(err).Errorf("error while using a dependency library")
+	}
+
+	migrateCmd.AddCommand(
+		newMigrateApplyCmd(ec),
+		newMigrateStatusCmd(ec),
+		newMigrateCreateCmd(ec),
+		newMigrateSquashCmd(ec),
+		newMigrateDeleteCmd(ec),
+	)
 
 	return migrateCmd
 }
 
-// ExecuteMigration runs the actual migration
+var (
+	errDatabaseNotFound   = stderrors.New("database not found")
+	errDatabaseNameNotSet = stderrors.New("--database-name flag is required")
+)
+
+// ExecuteMigration runs the actual migration.
 func ExecuteMigration(cmd string, t *migrate.Migrate, stepOrVersion int64) error {
-	var err error
+	var (
+		op  errors.Op = "commands.ExecuteMigration"
+		err error
+	)
 
 	switch cmd {
 	case "up":
@@ -74,20 +136,203 @@ func ExecuteMigration(cmd string, t *migrate.Migrate, stepOrVersion int64) error
 			direction = "up"
 		} else {
 			direction = "down"
-			stepOrVersion = -(stepOrVersion)
+			stepOrVersion = -stepOrVersion
 		}
+
 		err = mig.GotoCmd(t, uint64(stepOrVersion), direction)
 	default:
-		err = fmt.Errorf("Invalid command")
+		err = stderrors.New("invalid command")
 	}
 
-	return err
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	return nil
 }
 
 func executeStatus(t *migrate.Migrate) (*migrate.Status, error) {
+	var op errors.Op = "commands.executeStatus"
+
 	status, err := t.GetStatus()
 	if err != nil {
-		return nil, err
+		return nil, errors.E(op, err)
 	}
+
 	return status, nil
+}
+
+func validateConfigV3Flags(cmd *cobra.Command, ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.validateConfigV3Flags"
+
+	err := validateConfigV3Prechecks(cmd, ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	if ec.Config.Version < cli.V3 {
+		return nil
+	}
+
+	err = databaseChooser(ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	err = validateSourceInfo(ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	// check if migration ops are supported for the database
+	if !migrate.IsMigrationsSupported(ec.Source.Kind) {
+		return errors.E(
+			op,
+			fmt.Errorf(
+				"migrations on database '%s' of kind '%s' is not supported",
+				ec.Source.Name,
+				ec.Source.Kind,
+			),
+		)
+	}
+
+	return nil
+}
+
+func validateConfigV3FlagsWithAll(cmd *cobra.Command, ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.validateConfigV3FlagsWithAll"
+
+	err := validateConfigV3Prechecks(cmd, ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	if ec.Config.Version < cli.V3 {
+		return nil
+	}
+	// if --all-databases flag is present, ignore --database-name and showing UI prompt for choosing a single database
+	if cmd.Flags().Changed("all-databases") {
+		return nil
+	}
+
+	err = databaseChooserWithAllOption(ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	if ec.AllDatabases {
+		return nil
+	}
+
+	err = validateSourceInfo(ec)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	// check if migration ops are supported for the database
+	if !migrate.IsMigrationsSupported(ec.Source.Kind) {
+		return errors.E(
+			op,
+			fmt.Errorf(
+				"migrations on database '%s' of kind '%s' is not supported",
+				ec.Source.Name,
+				ec.Source.Kind,
+			),
+		)
+	}
+
+	return nil
+}
+
+func validateConfigV3Prechecks(cmd *cobra.Command, ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.validateConfigV3Prechecks"
+	// for project using config older than v3, use PG source kind
+	if ec.Config.Version < cli.V3 {
+		ec.Source.Kind = hasura.SourceKindPG
+
+		err := scripts.CheckIfUpdateToConfigV3IsRequired(ec)
+		if err != nil {
+			return errors.E(op, err)
+		}
+
+		return nil
+	}
+
+	// for project using config equal to or greater than v3
+	// database-name flag is required when running in non-terminal mode
+	if (!ec.IsTerminal || ec.Config.DisableInteractive) && !cmd.Flags().Changed("all-databases") &&
+		!cmd.Flags().Changed("database-name") {
+		return errors.E(op, errDatabaseNameNotSet)
+	}
+
+	return nil
+}
+
+func validateSourceInfo(ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.validateSourceInfo"
+	// find out the database kind by making a API call to server
+	// and update ec to include the database name and kind
+	sourceKind, err := metadatautil.GetSourceKind(
+		ec.APIClient.V1Metadata.ExportMetadata,
+		ec.Source.Name,
+	)
+	if err != nil {
+		return errors.E(
+			op,
+			fmt.Errorf("determining database kind of '%s': %w", ec.Source.Name, err),
+		)
+	}
+
+	if sourceKind == nil {
+		return errors.E(
+			op,
+			fmt.Errorf(
+				"%w: error determining database kind for '%s', check if database exists on hasura",
+				errDatabaseNotFound,
+				ec.Source.Name,
+			),
+		)
+	}
+
+	ec.Source.Kind = *sourceKind
+
+	return nil
+}
+
+func databaseChooser(ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.databaseChooser"
+	// prompt UI for choosing database if source name is not set
+	if ec.Source.Name == "" {
+		databaseName, err := metadatautil.DatabaseChooserUI(ec.APIClient.V1Metadata.ExportMetadata)
+		if err != nil {
+			return errors.E(op, err)
+		}
+
+		ec.Source.Name = databaseName
+	}
+
+	return nil
+}
+
+func databaseChooserWithAllOption(ec *cli.ExecutionContext) error {
+	var op errors.Op = "commands.databaseChooserWithAllOption"
+	// prompt UI for choosing database if source name is not set
+	if ec.Source.Name == "" {
+		databaseName, err := metadatautil.DatabaseChooserUIWithAll(
+			ec.APIClient.V1Metadata.ExportMetadata,
+		)
+		if err != nil {
+			return errors.E(op, err)
+		}
+
+		if databaseName == metadatautil.ChooseAllDatabases {
+			ec.AllDatabases = true
+
+			return nil
+		}
+
+		ec.Source.Name = databaseName
+	}
+
+	return nil
 }

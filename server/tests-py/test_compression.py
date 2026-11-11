@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
 import pytest
-import ruamel.yaml as yaml
 import jsondiff
+from ruamel.yaml import YAML
+
+yaml=YAML(typ='safe', pure=True)
 
 usefixtures = pytest.mark.usefixtures
 
+# A very basic test that compression seems to be working
 @usefixtures('per_class_tests_db_state')
 class TestCompression:
 
@@ -23,7 +26,7 @@ class TestCompression:
 
     def _get_config(self, f):
         with open(f) as c:
-            conf = yaml.safe_load(c)
+            conf = yaml.load(c)
             return conf['url'], conf['query'], conf['response']
 
     def _assert_status_code_200(self, resp):

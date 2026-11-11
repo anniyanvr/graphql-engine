@@ -1,0 +1,148 @@
+import z from 'zod';
+import {
+  Collapsible,
+  Dialog,
+  InputField,
+  useConsoleForm,
+  DialogFooter,
+} from '@hasura/shared/ui';
+
+import { schema } from '../../schema';
+
+import { areSSLSettingsEnabled } from '../../utils/helpers';
+import { DatabaseUrl } from '../DatabaseUrl';
+import { IsolationLevel } from '../IsolationLevel';
+import { PoolSettings } from '../PoolSettings';
+import { SslSettings } from '../SslSettings';
+import { UsePreparedStatements } from '../UsePreparedStatements';
+
+interface ConnectPostgresModalProps {
+  alreadyUseNames?: string[];
+  defaultValues?: z.infer<typeof schema>;
+  onClose: () => void;
+  onSubmit: (values: z.infer<typeof schema>) => void;
+}
+
+export const ConnectPostgresModal = (props: ConnectPostgresModalProps) => {
+  const { onClose, onSubmit, defaultValues, alreadyUseNames } = props;
+
+  const {
+    Form,
+    methods: { setError },
+  } = useConsoleForm({
+    schema,
+    options: {
+      defaultValues: defaultValues ?? {
+        configuration: {
+          connectionInfo: {
+            databaseUrl: {
+              connectionType: 'databaseUrl',
+            },
+          },
+        },
+      },
+    },
+  });
+
+  return (
+    // The Form must live INSIDE the Dialog: Dialog content is rendered through a
+    // portal, so a Form wrapping the Dialog would leave the submit button (which
+    // sits in the portaled content) detached from the <form> element — clicking
+    // "Add/Update Connection" (or pressing Enter) would then never submit. This
+    // matches the established pattern elsewhere (e.g. RenameRelationship).
+    <Dialog
+      size="lg"
+      title={defaultValues ? 'Edit Connection' : 'Add Connection'}
+      description={`${
+        defaultValues ? 'Edit connection' : 'Add connections'
+      } which will be available to be referenced in your dynamic connection template.`}
+      onClose={onClose}
+    >
+      <Form
+        onSubmit={(values: z.infer<typeof schema>) => {
+          if (alreadyUseNames?.includes(values.name)) {
+            setError('name', {
+              type: 'manual',
+              message: 'This name is already in use',
+            });
+          } else {
+            onSubmit(values);
+          }
+        }}
+      >
+        <>
+          <div className="px-6 mb-8">
+            <InputField
+              name="name"
+              label="Connection name"
+              fieldProps={{ placeholder: 'Connection name' }}
+            />
+
+            <div>
+              <DatabaseUrl
+                name="configuration.connectionInfo.databaseUrl"
+                hideOptions={[]}
+              />
+            </div>
+
+            <div className="mt-2">
+              <Collapsible
+                triggerChildren={
+                  <div className="font-semibold text-muted">
+                    Advanced Settings
+                  </div>
+                }
+              >
+                <PoolSettings
+                  name={`configuration.connectionInfo.poolSettings`}
+                />
+                <IsolationLevel
+                  name={`configuration.connectionInfo.isolationLevel`}
+                />
+                <UsePreparedStatements
+                  name={`configuration.connectionInfo.usePreparedStatements`}
+                />
+                {areSSLSettingsEnabled() && (
+                  <Collapsible
+                    triggerChildren={
+                      <div className="font-semibold text-muted">
+                        SSL Certificates Settings
+                        <span className="px-1.5 italic font-light">
+                          (Certificates will be loaded from{' '}
+                          <a
+                            href="https://hasura.io/docs/2.0/databases/postgres/gcp/#step-72-add-env-vars"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            environment variables
+                          </a>
+                          )
+                        </span>
+                      </div>
+                    }
+                  >
+                    <SslSettings
+                      name={`configuration.connectionInfo.sslSettings`}
+                    />
+                  </Collapsible>
+                )}
+              </Collapsible>
+            </div>
+          </div>
+          <DialogFooter
+            callToDeny="Cancel"
+            callToAction={
+              defaultValues ? 'Update Connection' : 'Add Connection'
+            }
+            onClose={onClose}
+            onSubmit={() => {
+              /* noop */
+            }}
+            onSubmitAnalyticsName="data-tab-dynamic-db-routing-add-connection-submit"
+            onCancelAnalyticsName="data-tab-dynamic-db-routing-add-connection-cancel"
+          />
+        </>
+      </Form>
+    </Dialog>
+  );
+};

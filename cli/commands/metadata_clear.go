@@ -1,22 +1,24 @@
 package commands
 
 import (
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/hasura/graphql-engine/cli/migrate"
-	"github.com/pkg/errors"
+	"fmt"
+
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/hasura/graphql-engine/cli/v2/internal/projectmetadata"
 	"github.com/spf13/cobra"
 )
 
 func newMetadataClearCmd(ec *cli.ExecutionContext) *cobra.Command {
 	opts := &MetadataClearOptions{
-		EC:         ec,
-		ActionType: "clear",
+		EC: ec,
 	}
 
 	metadataResetCmd := &cobra.Command{
 		Use:     "clear",
 		Aliases: []string{"reset"},
-		Short:   "Clear Hasura GraphQL Engine metadata on the database",
+		Short:   "Clear Hasura GraphQL Engine Metadata on the database",
+		Long:    "This command allows you to clear the Hasura GraphQL Engine Metadata. Passing in the `--endpoint` flag will clear the Hasura Metadata on the HGE instance specified by the endpoint.",
 		Example: `  # Clear all the metadata information from database:
   hasura metadata clear
 
@@ -27,16 +29,23 @@ func newMetadataClearCmd(ec *cli.ExecutionContext) *cobra.Command {
   hasura metadata clear --endpoint "<endpoint>"`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			op := genOpName(cmd, "RunE")
 			if cmd.CalledAs() == "reset" {
-				opts.EC.Logger.Warn("metadata reset command is deprecated, use metadata clear instead")
+				opts.EC.Logger.Warn(
+					"metadata reset command is deprecated, use metadata clear instead",
+				)
 			}
+
 			opts.EC.Spin("Clearing metadata...")
 			err := opts.Run()
 			opts.EC.Spinner.Stop()
+
 			if err != nil {
-				return errors.Wrap(err, "failed to clear metadata")
+				return errors.E(op, fmt.Errorf("failed to clear metadata: %w", err))
 			}
+
 			opts.EC.Logger.Info("Metadata cleared")
+
 			return nil
 		},
 	}
@@ -46,18 +55,20 @@ func newMetadataClearCmd(ec *cli.ExecutionContext) *cobra.Command {
 
 type MetadataClearOptions struct {
 	EC *cli.ExecutionContext
-
-	ActionType string
 }
 
 func (o *MetadataClearOptions) Run() error {
-	migrateDrv, err := migrate.NewMigrate(o.EC, true)
+	var (
+		op  errors.Op = "commands.MetadataClearOptions.Run"
+		err error
+	)
+
+	metadataHandler := projectmetadata.NewHandlerFromEC(o.EC)
+
+	err = metadataHandler.ResetMetadata()
 	if err != nil {
-		return err
+		return errors.E(op, fmt.Errorf("cannot clear Metadata: %w", err))
 	}
-	err = executeMetadata(o.ActionType, migrateDrv, o.EC)
-	if err != nil {
-		return errors.Wrap(err, "Cannot clear metadata")
-	}
+
 	return nil
 }

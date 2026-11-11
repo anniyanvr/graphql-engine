@@ -15,7 +15,7 @@ Leia mais em [hasura.io](https://hasura.io) e na [documentação](https://hasura
 
 ---
 
-![Hasura GraphQL Engine Demo](../assets/demo.gif)
+![Hasura GraphQL Engine Demo](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ---
 
@@ -78,7 +78,7 @@ O modo mais fácil de experimentar Hasura é via o Heroku.
 
 3. Faça sua primeira consulta GraphQL
 
-   Crie uma tabela e rode instantaneamente sua primeira consulta. Siga esse [simples guia](https://hasura.io/docs/1.0/graphql/manual/getting-started/first-graphql-query.html).
+   Crie uma tabela e rode instantaneamente sua primeira consulta. Siga esse [simples guia](https://hasura.io/docs/latest/graphql/core/getting-started/first-graphql-query.html).
 
 ### Outros métodos de implantação
 
@@ -86,12 +86,12 @@ Confira as instruções para as seguintes opções de implantação com um cliqu
 
 | **Fornecedor de infraestrutura** |                                                                                                                       **Link com um clique**                                                                                                                       |                                                             **Informação adicional**                                                              |
 | :------------------------------: | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------: |
-|           DigitalOcean           |                  [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme)                  | [docs](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
-|              Azure               | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) |                    [docs](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/azure-container-instances-postgres.html)                    |
+|           DigitalOcean           |                  [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme)                  | [docs](https://hasura.io/docs/latest/graphql/core/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
+|              Azure               | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) |                    [docs](https://hasura.io/docs/latest/graphql/core/guides/deployment/azure-container-instances-postgres.html)                    |
 
 ### Outros métodos de implantação
 
-Para implantação baseada no Docker e opções de configuração avançadas, veja o [guias de implantação](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) ou o
+Para implantação baseada no Docker e opções de configuração avançadas, veja o [guias de implantação](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) ou o
 [manifestos de instalação](/install-manifests).
 
 ## Arquitetura
@@ -120,31 +120,31 @@ Adicione lógica de negócios assíncrona que é acionada com base nos eventos d
 
 ### Dados derivados ou transformações de dados
 
-Transforme dados no Postgres ou execute a lógica de negócios para obter outro conjunto de dados que possa ser consultado usando o GraphQL Engine - [leia mais](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+Transforme dados no Postgres ou execute a lógica de negócios para obter outro conjunto de dados que possa ser consultado usando o GraphQL Engine - [leia mais](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## Demos
 
 Confira todos os aplicativos de exemplo no diretório
-[community/examples](../community/sample-apps).
+[community/examples](https://github.com/hasura/sample-apps/tree/main).
 
 ### Aplicações em tempo real
 
 - O aplicativo de bate-papo em grupo criado com o React inclui um indicador de digitação, usuários online e notificações de novas mensagens.
 
-  - [Experimente](https://realtime-chat.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-chat)
-  - [Browse APIs](https://realtime-chat.demo.hasura.app/console)
+  - [Experimente](https://realtime-chat.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Browse APIs](https://realtime-chat.demo.hasura.io/console)
 
 - Aplicativo de rastreamento de localização ao vivo que mostra um veículo em movimento alterando as coordenadas atuais do GPS em movimento no mapa.
 
-  - [Experimente](https://realtime-location-tracking.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-location-tracking)
-  - [Browse APIs](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Experimente](https://realtime-location-tracking.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Browse APIs](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Um painel em tempo real para agregações de dados em constante mudança de dados.
-  - [Experimente](https://realtime-poll.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-poll)
-  - [Browse APIs](https://realtime-poll.demo.hasura.app/console)
+  - [Experimente](https://realtime-poll.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Browse APIs](https://realtime-poll.demo.hasura.io/console)
 
 ### Vídeos
 
@@ -175,8 +175,8 @@ Confira nosso [guia de contribuição](/CONTRIBUTING.md) para mais detalhes.
 Os ativos da marca Hasura (logotipos, o mascote Hasura, powered by badges etc.) podem ser encontrados na pasta [assets/brand](../assets/brand). Sinta-se à vontade para usá-los em seu aplicativo / site, etc. Ficaríamos felizes se você adicionar o "Powered by Hasura" badge para seus aplicativos criados usando o Hasura. ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
@@ -184,7 +184,7 @@ Os ativos da marca Hasura (logotipos, o mascote Hasura, powered by badges etc.) 
 <a href="https://hasura.io">
   <img
     width="150px"
-    src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg"
+    src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg"
   />
 </a>
 
@@ -192,7 +192,7 @@ Os ativos da marca Hasura (logotipos, o mascote Hasura, powered by badges etc.) 
 <a href="https://hasura.io">
   <img
     width="150px"
-    src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg"
+    src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg"
   />
 </a>
 ```

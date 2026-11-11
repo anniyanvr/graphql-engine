@@ -1,0 +1,76 @@
+@use 'sass:color';
+
+.flexRow {
+  display: flex;
+}
+
+.add_btn {
+  margin: 10px 0;
+}
+
+.account {
+  padding: 20px 0;
+  line-height: 26px;
+}
+
+.sidebar {
+  height: calc(100vh - 54px - 6px);
+  overflow: auto;
+  background: #444;
+  /* Taken from boostrap navbar-inverse-color variables */
+  color: color.adjust(color.adjust(#000, $lightness: 46.7%), $lightness: 15%);
+
+  hr {
+    margin: 0;
+    /* taken from bootsrap $navbar-inverse-color variable */
+    border-color: color.adjust(
+      color.adjust(#000, $lightness: 46.7%),
+      $lightness: 15%
+    );
+  }
+
+  ul {
+    list-style-type: none;
+    padding-top: 10px;
+    padding-left: 7px;
+
+    li {
+      padding: 7px 0;
+      transition: color 0.5s;
+
+      a,
+      a:visited {
+        /* Taken from boostrap navbar-inverse-link-color variables */
+        color: color.adjust(
+          color.adjust(#000, $lightness: 46.7%),
+          $lightness: 15%
+        );
+      }
+
+      a:hover {
+        /* taken from bootsrap $navbar-inverse-link-hover-color variable */
+        color: #fff;
+        text-decoration: none;
+      }
+    }
+
+    li:hover {
+      padding: 7px 0;
+      /* taken from bootsrap $navbar-inverse-link-hover-color variable */
+      color: #fff;
+      transition: color 0.5s;
+      pointer: cursor;
+    }
+  }
+}
+
+.main {
+  padding-left: 15px;
+  height: calc(100vh - 54px - 6px);
+  overflow: auto;
+  padding-right: 15px;
+}
+
+.rightBar {
+  padding-left: 15px;
+}

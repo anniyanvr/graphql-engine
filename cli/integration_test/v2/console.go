@@ -1,18 +1,29 @@
 package v2
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/hasura/graphql-engine/cli/commands"
+	"github.com/avast/retry-go/v5"
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/commands"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConsoleCmd(t *testing.T, ec *cli.ExecutionContext) {
+	apiHost := &url.URL{
+		Host:   "localhost",
+		Scheme: "http",
+	}
 	opts := &commands.ConsoleOptions{
 		EC:                           ec,
 		APIPort:                      "9693",
+		APIHost:                      apiHost,
 		ConsolePort:                  "9695",
 		Address:                      "localhost",
 		DontOpenBrowser:              true,
@@ -20,19 +31,49 @@ func TestConsoleCmd(t *testing.T, ec *cli.ExecutionContext) {
 		ConsoleServerInterruptSignal: make(chan os.Signal),
 	}
 
-	go func() {
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
 		t.Log("waiting for console to start")
-		for opts.WG == nil {
-			time.Sleep(1 * time.Second)
-		}
+
+		timeout := 1 * time.Minute
+
+		require.NoError(t, retry.New(
+			retry.Attempts(5),
+		).Do(func() error {
+			_, err := net.DialTimeout(
+				"tcp",
+				fmt.Sprintf("%s:%s", opts.Address, opts.APIPort),
+				timeout,
+			)
+
+			return err
+		}))
+		require.NoError(t, retry.New(
+			retry.Attempts(5),
+		).Do(func() error {
+			_, err := net.DialTimeout(
+				"tcp",
+				fmt.Sprintf("%s:%s", opts.Address, opts.ConsolePort),
+				timeout,
+			)
+
+			return err
+		}))
+
 		opts.APIServerInterruptSignal <- os.Interrupt
+
 		opts.ConsoleServerInterruptSignal <- os.Interrupt
+
 		close(opts.APIServerInterruptSignal)
 		close(opts.ConsoleServerInterruptSignal)
-	}()
+	})
+
 	err := opts.Run()
 	if err != nil {
 		t.Fatalf("failed running console: %v", err)
 	}
+
+	wg.Wait()
 	// TODO: (shahidhk) curl the console endpoint for 200 response
 }

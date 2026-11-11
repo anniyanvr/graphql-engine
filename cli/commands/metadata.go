@@ -1,29 +1,61 @@
 package commands
 
 import (
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/hasura/graphql-engine/cli/migrate"
-	"github.com/hasura/graphql-engine/cli/util"
-	"github.com/pkg/errors"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+
+	"github.com/goccy/go-yaml"
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
+	"github.com/hasura/graphql-engine/cli/v2/internal/scripts"
+	"github.com/hasura/graphql-engine/cli/v2/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// NewMetadataCmd returns the metadata command
+type rawOutputFormat string
+
+const (
+	rawOutputFormatJSON rawOutputFormat = "json"
+	rawOutputFormatYAML rawOutputFormat = "yaml"
+)
+
+// NewMetadataCmd returns the metadata command.
 func NewMetadataCmd(ec *cli.ExecutionContext) *cobra.Command {
 	v := viper.New()
 	metadataCmd := &cobra.Command{
 		Use:     "metadata",
 		Aliases: []string{"md"},
-		Short:   "Manage Hasura GraphQL Engine metadata saved in the database",
+		Short:   "Manage Hasura GraphQL Engine Metadata saved in the database",
+		Long: `This command allows you to manage the Hasura GraphQL Engine Metadata saved in the database via a collection of flags and subcommands.
+		
+Further reading:
+- https://hasura.io/docs/latest/migrations-metadata-seeds/index/
+`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			op := genOpName(cmd, "PersistentPreRunE")
 			cmd.Root().PersistentPreRun(cmd, args)
+
 			ec.Viper = v
+
 			err := ec.Prepare()
 			if err != nil {
-				return err
+				return errors.E(op, err)
 			}
-			return ec.Validate()
+
+			err = ec.Validate()
+			if err != nil {
+				return errors.E(op, err)
+			}
+
+			if err := scripts.CheckIfUpdateToConfigV3IsRequired(ec); err != nil {
+				return errors.E(op, err)
+			}
+
+			return nil
 		},
 		SilenceUsage: true,
 	}
@@ -33,7 +65,9 @@ func NewMetadataCmd(ec *cli.ExecutionContext) *cobra.Command {
 		newMetadataClearCmd(ec),
 		newMetadataReloadCmd(ec),
 		newMetadataApplyCmd(ec),
+		newMetadataApplyDataSourcesCmd(ec),
 		newMetadataInconsistencyCmd(ec),
+		newMetadataCodemodCmd(ec, v),
 	)
 
 	f := metadataCmd.PersistentFlags()
@@ -41,9 +75,24 @@ func NewMetadataCmd(ec *cli.ExecutionContext) *cobra.Command {
 	f.String("endpoint", "", "http(s) endpoint for Hasura GraphQL Engine")
 	f.String("admin-secret", "", "admin secret for Hasura GraphQL Engine")
 	f.String("access-key", "", "access key for Hasura GraphQL Engine")
-	f.MarkDeprecated("access-key", "use --admin-secret instead")
-	f.Bool("insecure-skip-tls-verify", false, "skip TLS verification and disable cert checking (default: false)")
+
+	err := f.MarkDeprecated("access-key", "use --admin-secret instead")
+	if err != nil {
+		ec.Logger.WithError(err).Errorf("error while using a dependency library")
+	}
+
+	f.Bool(
+		"insecure-skip-tls-verify",
+		false,
+		"skip TLS verification and disable cert checking (default: false)",
+	)
 	f.String("certificate-authority", "", "path to a cert file for the certificate authority")
+	f.StringArrayVar(
+		&ec.HGEHeaderFlags,
+		"header",
+		nil,
+		`custom HTTP header to send with every request to Hasura GraphQL Engine, in "Name: value" form; repeatable. e.g. --header "Authorization: Bearer <token>"`,
+	)
 
 	util.BindPFlag(v, "endpoint", f.Lookup("endpoint"))
 	util.BindPFlag(v, "admin_secret", f.Lookup("admin-secret"))
@@ -54,33 +103,55 @@ func NewMetadataCmd(ec *cli.ExecutionContext) *cobra.Command {
 	return metadataCmd
 }
 
-func executeMetadata(cmd string, t *migrate.Migrate, ec *cli.ExecutionContext) error {
-	switch cmd {
-	case "export":
-		files, err := t.ExportMetadata()
+func writeByOutputFormat(w io.Writer, b []byte, format rawOutputFormat) error {
+	var op errors.Op = "commands.writeByOutputFormat"
+
+	switch format {
+	case rawOutputFormatJSON:
+		out := new(bytes.Buffer)
+
+		err := json.Indent(out, b, "", "  ")
 		if err != nil {
-			return errors.Wrap(err, "cannot export metadata from server")
+			return errors.E(op, err)
 		}
-		err = t.WriteMetadata(files)
+
+		_, err = io.Copy(w, out)
 		if err != nil {
-			return errors.Wrap(err, "cannot write metadata")
+			return errors.E(op, fmt.Errorf("writing output failed: %w", err))
 		}
-	case "clear":
-		err := t.ResetMetadata()
+	case rawOutputFormatYAML:
+		o, err := metadatautil.JSONToYAML(b)
 		if err != nil {
-			return errors.Wrap(err, "cannot clear Metadata")
+			return errors.E(op, err)
 		}
-	case "reload":
-		err := t.ReloadMetadata()
+
+		_, err = io.Copy(w, bytes.NewReader(o))
 		if err != nil {
-			return errors.Wrap(err, "cannot reload Metadata")
+			return errors.E(op, fmt.Errorf("writing output failed: %w", err))
 		}
-	case "apply":
-		err := t.ApplyMetadata()
-		if err != nil {
-			return errors.Wrap(err, "cannot apply metadata on the database")
-		}
-		return nil
+	default:
+		return errors.E(
+			op,
+			fmt.Errorf(
+				"output format '%v' is not supported. supported formats: %v, %v",
+				format,
+				rawOutputFormatJSON,
+				rawOutputFormatYAML,
+			),
+		)
 	}
+
 	return nil
+}
+
+func isJSON(str []byte) bool {
+	var js json.RawMessage
+
+	return json.Unmarshal(str, &js) == nil
+}
+
+func isYAML(str []byte) bool {
+	var y yaml.MapSlice
+
+	return yaml.Unmarshal(str, &y) == nil
 }

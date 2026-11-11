@@ -1,0 +1,32 @@
+import { createOperatorsObject } from '../../../PermissionsForm.utils';
+import { TableColumn } from '@hasura/metadata/data-source';
+import { Source } from '@hasura/shared/types';
+
+interface CreateDefaultsArgs {
+  tableName: string;
+  existingPermission?: Record<string, any>;
+  sourceMetadata: Source | undefined;
+  tableColumns: TableColumn[];
+}
+
+export const createDefaultValues = (props: CreateDefaultsArgs) => {
+  const { tableName, existingPermission, tableColumns, sourceMetadata } = props;
+  if (!existingPermission) {
+    return {};
+  }
+
+  const operators = createOperatorsObject({
+    tableName,
+    existingPermission,
+    tableColumns,
+    sourceMetadataTables: sourceMetadata?.tables,
+  });
+
+  return {
+    operators: {
+      filter: operators,
+    },
+    filter: existingPermission,
+    comment: existingPermission.comment,
+  };
+};

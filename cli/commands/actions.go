@@ -2,40 +2,60 @@ package commands
 
 import (
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/hasura/graphql-engine/cli/util"
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/hasura/graphql-engine/cli/v2/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// NewActionsCmd returns the actions command
+// NewActionsCmd returns the actions command.
 func NewActionsCmd(ec *cli.ExecutionContext) *cobra.Command {
 	v := viper.New()
 	actionsCmd := &cobra.Command{
-		Use:          "actions",
-		Short:        "Manage actions on hasura",
+		Use:   "actions",
+		Short: "Manage Hasura Actions",
+		Long: `Running this command enables the use of additional sub-commands to create, modify, and export code related to a project's Actions.
+
+Further Reading:
+- https://hasura.io/docs/latest/actions/index/
+- https://hasura.io/docs/latest/actions/create/
+- https://hasura.io/docs/latest/actions/derive/
+`,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			op := genOpName(cmd, "PersistentPreRunE")
 			cmd.Root().PersistentPreRun(cmd, args)
+
 			ec.Viper = v
+
 			err := ec.Prepare()
 			if err != nil {
-				return err
+				return errors.E(op, err)
 			}
+
 			err = ec.Validate()
 			if err != nil {
-				return err
+				return errors.E(op, err)
 			}
+
 			if ec.Config.Version < cli.V2 {
-				return fmt.Errorf("actions commands can be executed only when config version is greater than 1")
+				return errors.E(
+					op,
+					"actions commands can be executed only when config version is greater than 1",
+				)
 			}
+
 			if ec.MetadataDir == "" {
-				return fmt.Errorf("actions commands can be executed only when metadata_dir is set in config")
+				return errors.E(
+					op,
+					"actions commands can be executed only when metadata_dir is set in config",
+				)
 			}
+
 			return nil
 		},
 	}
@@ -51,9 +71,24 @@ func NewActionsCmd(ec *cli.ExecutionContext) *cobra.Command {
 	f.String("endpoint", "", "http(s) endpoint for Hasura GraphQL Engine")
 	f.String("admin-secret", "", "admin secret for Hasura GraphQL Engine")
 	f.String("access-key", "", "access key for Hasura GraphQL Engine")
-	f.MarkDeprecated("access-key", "use --admin-secret instead")
-	f.Bool("insecure-skip-tls-verify", false, "skip TLS verification and disable cert checking (default: false)")
+
+	err := f.MarkDeprecated("access-key", "use --admin-secret instead")
+	if err != nil {
+		ec.Logger.WithError(err).Errorf("error while using a dependency library")
+	}
+
+	f.Bool(
+		"insecure-skip-tls-verify",
+		false,
+		"skip TLS verification and disable cert checking (default: false)",
+	)
 	f.String("certificate-authority", "", "path to a cert file for the certificate authority")
+	f.StringArrayVar(
+		&ec.HGEHeaderFlags,
+		"header",
+		nil,
+		`custom HTTP header to send with every request to Hasura GraphQL Engine, in "Name: value" form; repeatable. e.g. --header "Authorization: Bearer <token>"`,
+	)
 
 	util.BindPFlag(v, "endpoint", f.Lookup("endpoint"))
 	util.BindPFlag(v, "admin_secret", f.Lookup("admin-secret"))
@@ -65,13 +100,19 @@ func NewActionsCmd(ec *cli.ExecutionContext) *cobra.Command {
 }
 
 func getCodegenFrameworks() (allFrameworks []codegenFramework, err error) {
-	frameworkFileBytes, err := ioutil.ReadFile(filepath.Join(ec.GlobalConfigDir, util.ActionsCodegenDirName, "frameworks.json"))
+	var op errors.Op = "commands.getCodegenFrameworks"
+
+	frameworkFileBytes, err := os.ReadFile(
+		filepath.Join(ec.GlobalConfigDir, util.ActionsCodegenDirName, "frameworks.json"),
+	)
 	if err != nil {
-		return
+		return allFrameworks, errors.E(op, err)
 	}
+
 	err = json.Unmarshal(frameworkFileBytes, &allFrameworks)
 	if err != nil {
-		return
+		return allFrameworks, errors.E(op, err)
 	}
-	return
+
+	return allFrameworks, nil
 }

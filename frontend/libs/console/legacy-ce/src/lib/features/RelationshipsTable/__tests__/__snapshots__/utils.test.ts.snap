@@ -1,0 +1,16 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`getRemoteFieldPath > should work with long remote field 1`] = `
+[
+  "country",
+  "continent",
+  "countries",
+  "states",
+]
+`;
+
+exports[`getRemoteFieldPath > should work with simple remote field 1`] = `
+[
+  "continents",
+]
+`;

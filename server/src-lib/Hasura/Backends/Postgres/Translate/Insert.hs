@@ -1,49 +1,71 @@
+-- | Postgres Translate Insert
+--
+-- Translates IR inserts to Postgres-specific SQL INSERT statements.
 module Hasura.Backends.Postgres.Translate.Insert
- ( mkInsertCTE
- , toSQLConflict
- , insertCheckConstraint
- , insertOrUpdateCheckExpr
- ) where
+  ( mkInsertCTE,
+    toSQLConflict,
+    insertCheckConstraint,
+    insertOrUpdateCheckExpr,
+  )
+where
 
-import           Hasura.Prelude
+import Hasura.Authentication.User (UserInfo)
+import Hasura.Backends.Postgres.SQL.DML qualified as S
+import Hasura.Backends.Postgres.SQL.Types
+import Hasura.Backends.Postgres.Translate.BoolExp
+import Hasura.Backends.Postgres.Translate.Returning
+import Hasura.Base.Error (QErr)
+import Hasura.Prelude
+import Hasura.RQL.IR.Insert
+import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
 
-import qualified Hasura.Backends.Postgres.SQL.DML             as S
+mkInsertCTE ::
+  (Backend ('Postgres pgKind), MonadIO m, MonadError QErr m) =>
+  UserInfo ->
+  InsertQueryP1 ('Postgres pgKind) ->
+  m S.TopLevelCTE
+mkInsertCTE userInfo (InsertQueryP1 tn cols vals conflict (insCheck, updCheck) _ _) = do
+  let toSQLBool = toSQLBoolExp userInfo $ S.QualTable tn
+  insCheckBoolExp <- toSQLBool insCheck
+  updateCheckBoolExps <- traverse toSQLBool updCheck
+  sqlConflictExp <- traverse (toSQLConflict userInfo tn) conflict
+  let tupVals = S.ValuesExp $ map S.TupleExp vals
+      insert =
+        S.SQLInsert tn cols tupVals sqlConflictExp
+          . Just
+          . S.RetExp
+          $ [ S.selectStar,
+              insertOrUpdateCheckExpr
+                tn
+                conflict
+                insCheckBoolExp
+                updateCheckBoolExps
+            ]
 
-import           Hasura.Backends.Postgres.SQL.Types
-import           Hasura.Backends.Postgres.Translate.BoolExp
-import           Hasura.Backends.Postgres.Translate.Returning
-import           Hasura.RQL.IR.Insert
-import           Hasura.RQL.Types
+  pure $ S.CTEInsert insert
 
-
-mkInsertCTE :: InsertQueryP1 'Postgres -> S.CTE
-mkInsertCTE (InsertQueryP1 tn cols vals conflict (insCheck, updCheck) _ _) =
-    S.CTEInsert insert
-  where
-    tupVals = S.ValuesExp $ map S.TupleExp vals
-    insert =
-      S.SQLInsert tn cols tupVals (toSQLConflict tn <$> conflict)
-        . Just
-        . S.RetExp
-        $ [ S.selectStar
-          , insertOrUpdateCheckExpr tn conflict
-            (toSQLBool insCheck)
-            (fmap toSQLBool updCheck)
-          ]
-    toSQLBool = toSQLBoolExp $ S.QualTable tn
-
-
-toSQLConflict :: QualifiedTable -> ConflictClauseP1 'Postgres S.SQLExp -> S.SQLConflict
-toSQLConflict tableName = \case
-  CP1DoNothing ct -> S.DoNothing $ toSQLCT <$> ct
-  CP1Update ct inpCols preSet filtr -> S.Update
-    (toSQLCT ct) (S.buildUpsertSetExp inpCols preSet) $
-    Just $ S.WhereFrag $ toSQLBoolExp (S.QualTable tableName) filtr
+toSQLConflict ::
+  (Backend ('Postgres pgKind), MonadIO m, MonadError QErr m) =>
+  UserInfo ->
+  QualifiedTable ->
+  OnConflictClause ('Postgres pgKind) S.SQLExp ->
+  m S.SQLConflict
+toSQLConflict userInfo tableName = \case
+  OCCDoNothing ct -> pure $ S.DoNothing $ toSQLCT <$> ct
+  OCCUpdate OnConflictClauseData {..} -> do
+    boolExp <- toSQLBoolExp userInfo (S.QualTable tableName) cp1udFilter
+    pure
+      $ S.Update
+        (toSQLCT cp1udConflictTarget)
+        (S.buildUpsertSetExp cp1udAffectedColumns cp1udValues)
+      $ Just
+      $ S.WhereFrag
+      $ boolExp
   where
     toSQLCT ct = case ct of
       CTColumn pgCols -> S.SQLColumn pgCols
       CTConstraint cn -> S.SQLConstraint cn
-
 
 -- | Annotates the check constraint expression with @boolean@
 -- (<check-condition>)::boolean
@@ -71,21 +93,22 @@ insertCheckConstraint boolExp =
 --
 -- See @https://stackoverflow.com/q/34762732@ for more information on the use of
 -- the @xmax@ system column.
-insertOrUpdateCheckExpr
-  :: QualifiedTable
-  -> Maybe (ConflictClauseP1 'Postgres S.SQLExp)
-  -> S.BoolExp
-  -> Maybe S.BoolExp
-  -> S.Extractor
+insertOrUpdateCheckExpr ::
+  QualifiedTable ->
+  Maybe (OnConflictClause ('Postgres pgKind) S.SQLExp) ->
+  S.BoolExp ->
+  Maybe S.BoolExp ->
+  S.Extractor
 insertOrUpdateCheckExpr qt (Just _conflict) insCheck (Just updCheck) =
-  asCheckErrorExtractor $
-  S.SECond
-    (S.BECompare
-      S.SEQ
-      (S.SEQIdentifier (S.QIdentifier (S.mkQual qt) (Identifier "xmax")))
-      (S.SEUnsafe "0"))
-    (insertCheckConstraint insCheck)
-    (insertCheckConstraint updCheck)
+  asCheckErrorExtractor
+    $ S.SECond
+      ( S.BECompare
+          S.SEQ
+          (S.SEQIdentifier (S.QIdentifier (S.mkQual qt) (Identifier "xmax")))
+          (S.SEUnsafe "0")
+      )
+      (insertCheckConstraint insCheck)
+      (insertCheckConstraint updCheck)
 insertOrUpdateCheckExpr _ _ insCheck _ =
   -- If we won't generate an ON CONFLICT clause, there is no point
   -- in testing xmax. In particular, views don't provide the xmax

@@ -1,0 +1,14 @@
+type: bulk
+args:
+- type: drop_query_collection
+  args:
+    collection: test_collection
+    cascade: false
+- type: drop_action
+  args:
+    name: get_user_by_email
+- type: drop_action
+  args:
+    name: get_user_by_email_with_client_header_forwarding
+- type: set_custom_types
+  args: {}

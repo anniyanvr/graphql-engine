@@ -13,10 +13,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/kardianos/osext"
-
-	"github.com/Masterminds/semver"
-	"github.com/pkg/errors"
+	"github.com/Masterminds/semver/v3"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 )
 
 const updateCheckURL = "https://releases.hasura.io/graphql-engine?agent=cli"
@@ -27,19 +25,27 @@ type updateCheckResponse struct {
 }
 
 func getLatestVersion() (*semver.Version, *semver.Version, error) {
+	var op errors.Op = "update.getLatestVersion"
+
 	res, err := http.Get(updateCheckURL)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "update check request")
+		return nil, nil, errors.E(op, fmt.Errorf("update check request: %w", err))
 	}
 
 	defer res.Body.Close()
+
 	var response updateCheckResponse
+
 	err = json.NewDecoder(res.Body).Decode(&response)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "decoding update check response")
+		return nil, nil, errors.E(op, fmt.Errorf("decoding update check response: %w", err))
 	}
+
 	if response.Latest == nil && response.PreRelease == nil {
-		return nil, nil, fmt.Errorf("expected version info not found at %s", updateCheckURL)
+		return nil, nil, errors.E(
+			op,
+			fmt.Errorf("expected version info not found at %s", updateCheckURL),
+		)
 	}
 
 	return response.Latest, response.PreRelease, nil
@@ -48,10 +54,12 @@ func getLatestVersion() (*semver.Version, *semver.Version, error) {
 func buildAssetURL(v string) string {
 	os := runtime.GOOS
 	arch := runtime.GOARCH
+
 	extension := ""
 	if os == "windows" {
 		extension = ".exe"
 	}
+
 	return fmt.Sprintf(
 		"https://github.com/hasura/graphql-engine/releases/download/v%s/cli-hasura-%s-%s%s",
 		v, os, arch, extension,
@@ -59,54 +67,74 @@ func buildAssetURL(v string) string {
 }
 
 func downloadAsset(url, fileName, filePath string) (*os.File, error) {
+	var op errors.Op = "update.downloadAsset"
+
 	res, err := http.Get(url)
 	if err != nil {
-		return nil, errors.Wrap(err, "downloading asset")
+		return nil, errors.E(op, errors.KindNetwork, fmt.Errorf("downloading asset: %w", err))
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != 200 {
-		return nil, errors.New("could not find the release asset")
+	if res.StatusCode != http.StatusOK {
+		return nil, errors.E(op, fmt.Errorf(
+			"could not download release asset from %s: unexpected HTTP status %s",
+			url, res.Status,
+		))
 	}
 
 	asset, err := os.OpenFile(
 		filepath.Join(filePath, fileName),
 		os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-		0755,
+		0o755,
 	)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating new binary file")
+		return nil, errors.E(op, fmt.Errorf("creating new binary file: %w", err))
 	}
 	defer asset.Close()
 
 	_, err = io.Copy(asset, res.Body)
 	if err != nil {
-		return nil, errors.Wrap(err, "saving downloaded file")
+		return nil, errors.E(op, fmt.Errorf("saving downloaded file: %w", err))
 	}
 
 	return asset, nil
 }
 
 // HasUpdate tells us if there is a new stable or prerelease update available.
-func HasUpdate(currentVersion *semver.Version, timeFile string) (bool, *semver.Version, bool, *semver.Version, error) {
+func HasUpdate(
+	currentVersion *semver.Version,
+	timeFile string,
+) (bool, *semver.Version, bool, *semver.Version, error) {
+	var op errors.Op = "update.HasUpdate"
+
 	if timeFile != "" {
-		defer writeTimeToFile(timeFile, time.Now().UTC())
+		defer func() {
+			err := writeTimeToFile(timeFile, time.Now().UTC())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "failed writing last update check time: ", err)
+			}
+		}()
 	}
 
 	latestVersion, preReleaseVersion, err := getLatestVersion()
 	if err != nil {
-		return false, nil, false, nil, errors.Wrap(err, "get latest version")
+		return false, nil, false, nil, errors.E(op, fmt.Errorf("get latest version: %w", err))
 	}
 
-	return latestVersion.GreaterThan(currentVersion), latestVersion, preReleaseVersion.GreaterThan(currentVersion), preReleaseVersion, nil
+	return latestVersion.GreaterThan(
+			currentVersion,
+		), latestVersion, preReleaseVersion.GreaterThan(
+			currentVersion,
+		), preReleaseVersion, nil
 }
 
 // ApplyUpdate downloads and applies the update indicated by version v.
 func ApplyUpdate(v *semver.Version) error {
+	var op errors.Op = "update.ApplyUpdate"
 	// get the current executable
-	exe, err := osext.Executable()
+	exe, err := getExecutablePath()
 	if err != nil {
-		return errors.Wrap(err, "find executable")
+		return errors.E(op, fmt.Errorf("find executable: %w", err))
 	}
 
 	// extract the filename and path
@@ -118,7 +146,7 @@ func ApplyUpdate(v *semver.Version) error {
 		buildAssetURL(v.String()), "."+exeName+".new", exePath,
 	)
 	if err != nil {
-		return errors.Wrap(err, "download asset")
+		return errors.E(op, fmt.Errorf("download asset: %w", err))
 	}
 
 	// get the downloaded binary name and build the absolute path
@@ -136,13 +164,13 @@ func ApplyUpdate(v *semver.Version) error {
 	// rename the current binary as old binary
 	err = os.Rename(exe, oldExe)
 	if err != nil {
-		return errors.Wrap(err, "rename exe to old")
+		return errors.E(op, fmt.Errorf("rename exe to old: %w", err))
 	}
 
 	// rename the new binary as the current binary
 	err = os.Rename(newExe, exe)
 	if err != nil {
-		// rename unsuccessfull
+		// rename unsuccessful
 		//
 		// The filesystem is now in a bad state. We have successfully
 		// moved the existing binary to a new location, but we couldn't move the new
@@ -152,13 +180,12 @@ func ApplyUpdate(v *semver.Version) error {
 		rerr := os.Rename(oldExe, exe)
 		if rerr != nil {
 			// rolling back failed, ask user to re-install cli
-			return errors.Wrap(
-				rerr,
-				"rename old to exe: inconsistent state, re-install cli",
-			)
+			return errors.E(op, fmt.Errorf(
+				"rename old to exe: inconsistent state, re-install cli: %w",
+				rerr))
 		}
 		// rolled back, throw update error
-		return errors.Wrap(err, "rename new to exe")
+		return errors.E(op, fmt.Errorf("rename new to exe: %w", err))
 	}
 
 	// rename success, remove the old binary
@@ -171,4 +198,20 @@ func ApplyUpdate(v *semver.Version) error {
 	}
 
 	return nil
+}
+
+// Returns an absolute path that can be used to
+// re-invoke the current program.
+func getExecutablePath() (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	realPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		realPath = execPath
+	}
+
+	return realPath, nil
 }

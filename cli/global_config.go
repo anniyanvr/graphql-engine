@@ -2,25 +2,24 @@ package cli
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	stderrors "errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
-	"github.com/sirupsen/logrus"
-
-	"github.com/gofrs/uuid"
-	homedir "github.com/mitchellh/go-homedir"
-	"github.com/pkg/errors"
+	"github.com/google/uuid"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/spf13/viper"
 )
 
-// Environment defines the environment the CLI is running
+// Environment defines the environment the CLI is running.
 type Environment string
 
 const (
-	// DefaultEnvironment - CLI running in default mode
+	// DefaultEnvironment - CLI running in default mode.
 	DefaultEnvironment Environment = "default"
-	// ServerOnDockerEnvironment - CLI running in cli-migrations image
+	// ServerOnDockerEnvironment - CLI running in cli-migrations image.
 	ServerOnDockerEnvironment = "server-on-docker"
 )
 
@@ -45,30 +44,29 @@ type rawGlobalConfig struct {
 	ShowUpdateNotification *bool       `json:"show_update_notification"`
 	CLIEnvironment         Environment `json:"cli_environment"`
 
-	logger      *logrus.Logger
 	shoudlWrite bool
 }
 
 func (c *rawGlobalConfig) read(filename string) error {
-	b, err := ioutil.ReadFile(filename)
+	var op errors.Op = "cli.rawGlobalConfig.read"
+
+	b, err := os.ReadFile(filename)
 	if err != nil {
-		return errors.Wrap(err, "read file")
+		return errors.E(op, fmt.Errorf("read file: %w", err))
 	}
+
 	err = json.Unmarshal(b, c)
 	if err != nil {
-		return errors.Wrap(err, "parse file")
+		return errors.E(op, fmt.Errorf("parse file %w", err))
 	}
+
 	return nil
 }
 
 func (c *rawGlobalConfig) validateKeys() error {
 	// check prescence of uuid, create if doesn't exist
 	if c.UUID == nil {
-		u, err := uuid.NewV4()
-		if err != nil {
-			errors.Wrap(err, "failed generating uuid")
-		}
-		uid := u.String()
+		uid := uuid.NewString()
 		c.UUID = &uid
 		c.shoudlWrite = true
 	}
@@ -95,27 +93,34 @@ func (c *rawGlobalConfig) validateKeys() error {
 }
 
 func (c *rawGlobalConfig) write(filename string) error {
+	var op errors.Op = "cli.rawGlobalConfig.write"
+
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return errors.Wrap(err, "marshal file")
+		return errors.E(op, fmt.Errorf("marshal file: %w", err))
 	}
-	err = ioutil.WriteFile(filename, b, 0644)
+
+	err = os.WriteFile(filename, b, 0o644)
 	if err != nil {
-		return errors.Wrap(err, "write file")
+		return errors.E(op, fmt.Errorf("write file: %w", err))
 	}
+
 	return nil
 }
 
 // setupGlobConfig ensures that global config directory and file exists and
 // reads it into the GlobalConfig object.
 func (ec *ExecutionContext) setupGlobalConfig() error {
+	var op errors.Op = "cli.ExecutionContext.setupGlobalConfig"
 	// check if the directory name is set, else default
 	if len(ec.GlobalConfigDir) == 0 {
 		ec.Logger.Debug("global config directory is not pre-set, defaulting")
-		home, err := homedir.Dir()
+
+		home, err := os.UserHomeDir()
 		if err != nil {
-			return errors.Wrap(err, "cannot get home directory")
+			return errors.E(op, fmt.Errorf("cannot get home directory: %w", err))
 		}
+
 		globalConfigDir := filepath.Join(home, GlobalConfigDirName)
 		ec.GlobalConfigDir = globalConfigDir
 		ec.Logger.Debugf("global config directory set as '%s'", ec.GlobalConfigDir)
@@ -124,7 +129,7 @@ func (ec *ExecutionContext) setupGlobalConfig() error {
 	// create the config directory
 	err := os.MkdirAll(ec.GlobalConfigDir, os.ModePerm)
 	if err != nil {
-		return errors.Wrap(err, "cannot create global config directory")
+		return errors.E(op, fmt.Errorf("cannot create global config directory: %w", err))
 	}
 
 	// check if the filename is set, else default
@@ -135,10 +140,11 @@ func (ec *ExecutionContext) setupGlobalConfig() error {
 
 	// check if the global config file exist
 	_, err = os.Stat(ec.GlobalConfigFile)
-	if os.IsNotExist(err) {
-
+	if stderrors.Is(err, fs.ErrNotExist) {
 		// file does not exist, teat as first run and create it
-		ec.Logger.Debug("global config file does not exist, this could be the first run, creating it...")
+		ec.Logger.Debug(
+			"global config file does not exist, this could be the first run, creating it...",
+		)
 
 		// create an empty config object
 		gc := &rawGlobalConfig{}
@@ -146,53 +152,68 @@ func (ec *ExecutionContext) setupGlobalConfig() error {
 		// populate the keys
 		err := gc.validateKeys()
 		if err != nil {
-			return errors.Wrap(err, "setup global config object")
+			return errors.E(op, fmt.Errorf("setup global config object: %w", err))
 		}
 
 		// write the file
 		err = gc.write(ec.GlobalConfigFile)
 		if err != nil {
-			return errors.Wrap(err, "write global config file")
+			return errors.E(op, fmt.Errorf("write global config file: %w", err))
 		}
-		ec.Logger.Debugf("global config file written at '%s' with content '%v'", ec.GlobalConfigFile, gc)
+
+		ec.Logger.Debugf(
+			"global config file written at '%s' with content '%v'",
+			ec.GlobalConfigFile,
+			gc,
+		)
 
 		// also show a notice about telemetry
-		ec.Logger.Info(StrTelemetryNotice)
-
-	} else if os.IsExist(err) || err == nil {
-
+		ec.Logger.Info(TelemetryNotice)
+	} else if stderrors.Is(err, fs.ErrExist) || err == nil {
 		// file exists, verify contents
-		ec.Logger.Debug("global config file exisits, verifying contents")
+		ec.Logger.Debug("global config file exists, verifying contents")
 
 		// initialize the config object
 		gc := rawGlobalConfig{}
+
 		err := gc.read(ec.GlobalConfigFile)
 		if err != nil {
-			return errors.Wrap(err, "reading global config file failed")
+			return errors.E(op, fmt.Errorf("reading global config file failed: %w", err))
 		}
 
 		// validate keys
 		err = gc.validateKeys()
 		if err != nil {
-			return errors.Wrap(err, "validating global config file failed")
+			return errors.E(op, fmt.Errorf("validating global config file failed: %w", err))
 		}
 
 		// write the file if there are any changes
 		if gc.shoudlWrite {
 			err := gc.write(ec.GlobalConfigFile)
 			if err != nil {
-				return errors.Wrap(err, "writing global config file failed")
+				return errors.E(op, fmt.Errorf("writing global config file failed: %w", err))
 			}
-			ec.Logger.Debugf("global config file written at '%s' with content '%+#v'", ec.GlobalConfigFile, gc)
-		}
 
+			ec.Logger.Debugf(
+				"global config file written at '%s' with content '%+#v'",
+				ec.GlobalConfigFile,
+				gc,
+			)
+		}
 	}
-	return ec.readGlobalConfig()
+
+	err = ec.readGlobalConfig()
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	return nil
 }
 
 // readGlobalConfig reads the configuration from global config file env vars,
 // through viper.
 func (ec *ExecutionContext) readGlobalConfig() error {
+	var op errors.Op = "cli.ExecutionContext.readGlobalConfig"
 	// need to get existing viper because https://github.com/spf13/viper/issues/233
 	v := viper.New()
 	v.SetEnvPrefix("HASURA_GRAPHQL")
@@ -200,10 +221,12 @@ func (ec *ExecutionContext) readGlobalConfig() error {
 	v.SetConfigName("config")
 	v.AddConfigPath(ec.GlobalConfigDir)
 	v.SetDefault("cli_environment", DefaultEnvironment)
+
 	err := v.ReadInConfig()
 	if err != nil {
-		return errors.Wrap(err, "cannot read global config from file/env")
+		return errors.E(op, fmt.Errorf("cannot read global config from file/env: %w", err))
 	}
+
 	if ec.GlobalConfig == nil {
 		ec.Logger.Debugf("global config is not pre-set, reading from current env")
 		ec.GlobalConfig = &GlobalConfig{
@@ -215,13 +238,18 @@ func (ec *ExecutionContext) readGlobalConfig() error {
 	} else {
 		ec.Logger.Debugf("global config is pre-set to %#v", ec.GlobalConfig)
 	}
+
 	ec.Logger.Debugf("global config: uuid: %v", ec.GlobalConfig.UUID)
 	ec.Logger.Debugf("global config: enableTelemetry: %v", ec.GlobalConfig.EnableTelemetry)
-	ec.Logger.Debugf("global config: showUpdateNotification: %v", ec.GlobalConfig.ShowUpdateNotification)
+	ec.Logger.Debugf(
+		"global config: showUpdateNotification: %v",
+		ec.GlobalConfig.ShowUpdateNotification,
+	)
 	ec.Logger.Debugf("global config: cliEnvironment: %v", ec.GlobalConfig.CLIEnvironment)
 
 	// set if telemetry can be beamed or not
 	ec.Telemetry.CanBeam = ec.GlobalConfig.EnableTelemetry
 	ec.Telemetry.UUID = ec.GlobalConfig.UUID
+
 	return nil
 }

@@ -22,34 +22,42 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
-	"unicode"
 
-	"github.com/hasura/graphql-engine/cli"
-	"github.com/pkg/errors"
+	"github.com/hasura/graphql-engine/cli/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/spf13/cobra"
 )
 
 var validPluginFilenamePrefixes = []string{"hasura"}
 
-// NewPluginsCmd returns the plugins command
+// NewPluginsCmd returns the plugins command.
 func NewPluginsCmd(ec *cli.ExecutionContext) *cobra.Command {
 	pluginsCmd := &cobra.Command{
-		Use:     "plugins",
-		Aliases: []string{"plugin"},
-		Short:   "Manage plugins for the cli",
-		Long: `Plugins can be installed to extend the functionality of Hasura CLI
-An index for all available plugins can be found at 
-https://github.com/hasura/cli-plugins-index
-
-Please open pull requests against this repo to add new plugins`,
+		Use:          "plugins",
+		Aliases:      []string{"plugin"},
+		Short:        "Manage plugins for the CLI",
+		Long:         "The functionality of the CLI can be extended by using plugins. For a list of all available plugins, run ``hasura plugins list``, or visit this repository: https://github.com/hasura/cli-plugins-index.\n\nIf you're interested in contributing, please open a PR against this repo to add new plugin.",
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			op := genOpName(cmd, "PersistentPreRunE")
 			cmd.Root().PersistentPreRun(cmd, args)
-			return ec.PluginsConfig.Repo.EnsureCloned()
+			// setup plugins path
+			err := ec.SetupPlugins()
+			if err != nil {
+				return errors.E(op, fmt.Errorf("setting up plugins path failed: %w", err))
+			}
+
+			if err := ec.PluginsConfig.Repo.EnsureCloned(); err != nil {
+				return errors.E(
+					op,
+					fmt.Errorf("pulling latest plugins list from internet failed: %w", err),
+				)
+			}
+
+			return nil
 		},
 	}
 	pluginsCmd.AddCommand(
@@ -58,6 +66,7 @@ Please open pull requests against this repo to add new plugins`,
 		newPluginsUnInstallCmd(ec),
 		newPluginsUpgradeCmd(ec),
 	)
+
 	return pluginsCmd
 }
 
@@ -78,7 +87,7 @@ type PluginHandler interface {
 	Execute(executablePath string, cmdArgs, environment []string) error
 }
 
-// DefaultPluginHandler implements PluginHandler
+// DefaultPluginHandler implements PluginHandler.
 type DefaultPluginHandler struct {
 	ValidPrefixes []string
 }
@@ -91,23 +100,28 @@ func NewDefaultPluginHandler(validPrefixes []string) *DefaultPluginHandler {
 	}
 }
 
-// Lookup implements PluginHandler
+// Lookup implements PluginHandler.
 func (h *DefaultPluginHandler) Lookup(filename string) (string, bool) {
 	for _, prefix := range h.ValidPrefixes {
-		filename := filepath.Join(ec.PluginsConfig.Paths.BinPath(), fmt.Sprintf("%s-%s", prefix, filename))
+		filename := filepath.Join(
+			ec.PluginsConfig.Paths.BinPath(),
+			fmt.Sprintf("%s-%s", prefix, filename),
+		)
+
 		path, err := exec.LookPath(filename)
 		if err != nil || len(path) == 0 {
 			continue
 		}
+
 		return path, true
 	}
 
 	return "", false
 }
 
-// Execute implements PluginHandler
+// Execute implements PluginHandler.
 func (h *DefaultPluginHandler) Execute(executablePath string, cmdArgs, environment []string) error {
-
+	var op errors.Op = "commands.DefaultPluginHandler.Execute"
 	// Windows does not support exec syscall.
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command(executablePath, cmdArgs...)
@@ -115,28 +129,38 @@ func (h *DefaultPluginHandler) Execute(executablePath string, cmdArgs, environme
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
 		cmd.Env = environment
+
 		err := cmd.Run()
 		if err == nil {
 			os.Exit(0)
 		}
-		return err
+
+		return errors.E(op, err)
 	}
 
 	// invoke cmd binary relaying the environment and args given
 	// append executablePath to cmdArgs, as execve will make first argument the "binary name".
-	return syscall.Exec(executablePath, append([]string{executablePath}, cmdArgs...), environment)
+	err := syscall.Exec(executablePath, append([]string{executablePath}, cmdArgs...), environment)
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	return nil
 }
 
 // HandlePluginCommand receives a pluginHandler and command-line arguments and attempts to find
 // a plugin executable on the PATH that satisfies the given arguments.
 func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string) error {
+	var op errors.Op = "commands.HandlePluginCommand"
+
 	remainingArgs := []string{} // all "non-flag" arguments
 
 	for idx := range cmdArgs {
 		if strings.HasPrefix(cmdArgs[idx], "-") {
 			break
 		}
-		remainingArgs = append(remainingArgs, strings.Replace(cmdArgs[idx], "-", "_", -1))
+
+		remainingArgs = append(remainingArgs, strings.ReplaceAll(cmdArgs[idx], "-", "_"))
 	}
 
 	foundBinaryPath := ""
@@ -146,10 +170,12 @@ func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string) error {
 		path, found := pluginHandler.Lookup(strings.Join(remainingArgs, "-"))
 		if !found {
 			remainingArgs = remainingArgs[:len(remainingArgs)-1]
+
 			continue
 		}
 
 		foundBinaryPath = path
+
 		break
 	}
 
@@ -158,33 +184,18 @@ func HandlePluginCommand(pluginHandler PluginHandler, cmdArgs []string) error {
 	}
 
 	// invoke cmd binary relaying the current environment and args given
-	if err := pluginHandler.Execute(foundBinaryPath, cmdArgs[len(remainingArgs):], os.Environ()); err != nil {
-		return err
+	err := pluginHandler.Execute(foundBinaryPath, cmdArgs[len(remainingArgs):], os.Environ())
+	if err != nil {
+		return errors.E(op, err)
 	}
 
 	return nil
-}
-
-func ensureDirs(paths ...string) error {
-	for _, p := range paths {
-		if err := os.MkdirAll(p, 0755); err != nil {
-			return errors.Wrapf(err, "failed to ensure create directory %q", p)
-		}
-	}
-	return nil
-}
-
-func indent(s string) string {
-	out := "\\\n"
-	s = strings.TrimRightFunc(s, unicode.IsSpace)
-	out += regexp.MustCompile("(?m)^").ReplaceAllString(s, " | ")
-	out += "\n/"
-	return out
 }
 
 func limitString(s string, length int) string {
 	if len(s) > length && length > 3 {
 		s = s[:length-3] + "..."
 	}
+
 	return s
 }

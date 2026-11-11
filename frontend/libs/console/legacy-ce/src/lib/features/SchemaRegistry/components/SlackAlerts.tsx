@@ -1,0 +1,279 @@
+import React from 'react';
+import { Flex } from '@radix-ui/themes';
+import { Button, Tooltip } from '@hasura/shared/ui';
+import { AlertHeader } from './AlertsHeader';
+import {
+  FaBell,
+  FaTimes,
+  FaExclamationTriangle,
+  FaCheck,
+  FaTrash,
+} from 'react-icons/fa';
+import {
+  useSlackIntegration,
+  SlackOauthStatus,
+} from '../hooks/useSlackIntegration';
+import globals from '../../../Globals';
+import { useGetSlackState } from '../hooks/useGetSlackState';
+import { SlackButtonSVG } from './SlackButtonSvg';
+import { SlackDeleteConfirmationDialog } from './SlackDeleteConfirmationDialog';
+import { Analytics } from '@hasura/shared/analytics';
+
+type TileProp = {
+  statusIcon: React.ReactNode;
+  actionName: string;
+  actionIcon: React.ReactNode;
+  message: React.ReactNode;
+};
+
+const getSlackIntegrationStatusTileProps = (
+  slackStatus: SlackOauthStatus,
+  onAction: () => void,
+): TileProp | null => {
+  switch (slackStatus.status) {
+    case 'error': {
+      return {
+        statusIcon: (
+          <FaExclamationTriangle className="fill-current h-4 w-4 mr-8 shrink-0 text-gray-500" />
+        ),
+        actionName: 'dismiss-slack-integration-error',
+        actionIcon: (
+          <Tooltip content="Dismiss">
+            <FaTimes
+              className="fill-current cursor-pointer text-muted hover:text-gray-800 ml-2"
+              onClick={onAction}
+            />
+          </Tooltip>
+        ),
+        message: <p>{slackStatus.error.message}</p>,
+      };
+    }
+    case 'authenticated': {
+      return {
+        statusIcon: (
+          <FaCheck className="fill-current mt-[3px] h-4 w-4 mr-8 shrink-0 text-emerald-500" />
+        ),
+        actionName: 'delete-slack-integration',
+        actionIcon: (
+          <Tooltip content="Remove Slack Integration">
+            <FaTrash
+              className="fill-current cursor-pointer text-muted hover:text-gray-800 ml-2"
+              onClick={onAction}
+            />
+          </Tooltip>
+        ),
+        message: (
+          <div>
+            Slack Integration for alerts on this project has been configured for
+            the channel <b>{slackStatus.channelName}</b> for{' '}
+            <b>{slackStatus.teamName}</b> workspace.
+          </div>
+        ),
+      };
+    }
+    default: {
+      return null;
+    }
+  }
+};
+
+type SlackIntegrationStatusTileProps = {
+  status: SlackOauthStatus;
+  onAction: () => void;
+};
+
+const SlackIntegrationStatusTile: React.FC<SlackIntegrationStatusTileProps> = (
+  props,
+) => {
+  const { status, onAction } = props;
+
+  const slackIntegrationTileProps = getSlackIntegrationStatusTileProps(
+    status,
+    onAction,
+  );
+
+  if (!slackIntegrationTileProps) return null;
+
+  const { statusIcon, actionName, actionIcon, message } =
+    slackIntegrationTileProps;
+  return (
+    <Flex
+      justify="between"
+      className="border rounded mx-6 p-2 mb-4 text-gray-500"
+    >
+      <Flex justify="start" align="center">
+        {statusIcon}
+        {message}
+      </Flex>
+      <Analytics name={`settings-schema-registry-slack-alerts-${actionName}`}>
+        <Flex>{actionIcon}</Flex>
+      </Analytics>
+    </Flex>
+  );
+};
+
+type SlackIntegrationStateProps = {
+  slackIntegrationStatus: SlackOauthStatus;
+  onIntegrationSlack: () => void;
+  onDelete: () => void;
+  onDismiss: () => void;
+};
+
+const SlackIntegrationState = (props: SlackIntegrationStateProps) => {
+  const { slackIntegrationStatus, onIntegrationSlack, onDelete, onDismiss } =
+    props;
+  const isButtonDisabled = slackIntegrationStatus.status === 'authenticating';
+
+  switch (slackIntegrationStatus.status) {
+    case 'idle':
+    case 'authenticating':
+      return (
+        <Flex justify="center" className="mb-4">
+          <Analytics name="settings-schema-registry-add-to-slack-btn">
+            <Button
+              onClick={onIntegrationSlack}
+              mode="default"
+              data-testid="onboarding-wizard-neon-connect-db-button"
+              loading={isButtonDisabled}
+              disabled={isButtonDisabled}
+            >
+              <Flex justify="center">
+                <SlackButtonSVG />
+                <p className="ml-2">Add to Slack</p>
+              </Flex>
+            </Button>
+          </Analytics>
+        </Flex>
+      );
+    case 'authenticated': {
+      return (
+        <SlackIntegrationStatusTile
+          status={slackIntegrationStatus}
+          onAction={onDelete}
+        />
+      );
+    }
+    case 'error':
+      return (
+        <SlackIntegrationStatusTile
+          status={slackIntegrationStatus}
+          onAction={onDismiss}
+        />
+      );
+  }
+};
+
+type SlackAlertsProps = {
+  onClose: () => void;
+};
+
+export const SlackAlerts: React.FC<SlackAlertsProps> = ({ onClose }) => {
+  const projectID = globals.hasuraCloudProjectId || '';
+
+  const slackState = useGetSlackState(projectID);
+
+  const doesSlackIntegrationExist =
+    slackState.kind === 'success' && slackState.response.slack_config.length;
+
+  const slackChannel = doesSlackIntegrationExist
+    ? slackState.response.slack_config[0].channel_name
+    : '';
+  const slackTeam = doesSlackIntegrationExist
+    ? slackState.response.slack_config[0].team_name
+    : '';
+
+  const [
+    isSlackDeleteConfirmationModalOpen,
+    setIsSlackDeleteConfirmationModalOpen,
+  ] = React.useState(false);
+
+  const onCloseDeleteConfirmation = () => {
+    setIsSlackDeleteConfirmationModalOpen(false);
+  };
+
+  const { slackOauthStatus, startSlackOAuth, deleteSlackApp } =
+    useSlackIntegration(onCloseDeleteConfirmation);
+
+  const [slackIntegrationStatus, setSlackIntegrationStatus] =
+    React.useState<SlackOauthStatus>(() =>
+      !doesSlackIntegrationExist && slackOauthStatus.status === 'authenticated'
+        ? { status: 'idle' }
+        : slackOauthStatus,
+    );
+
+  const onIntegrateSlack = () => {
+    startSlackOAuth();
+  };
+
+  const onDelete = () => {
+    setIsSlackDeleteConfirmationModalOpen(true);
+  };
+
+  const onDeleteSlack = React.useCallback(() => {
+    deleteSlackApp.mutate({ projectID: projectID });
+  }, [projectID, deleteSlackApp]);
+
+  const onDismiss = React.useCallback(() => {
+    if (slackIntegrationStatus.status === 'error') {
+      setSlackIntegrationStatus({ status: 'idle' });
+    }
+  }, [slackIntegrationStatus]);
+
+  // Mirror the OAuth status coming from the integration hook. When either the
+  // OAuth status or whether an integration already exists changes, re-sync the
+  // local state during render (guarded by the previous values). This keeps
+  // user-driven overrides (e.g. dismissing an error -> idle) in place until the
+  // next real change, and avoids the extra render pass of an effect.
+  const [prevSync, setPrevSync] = React.useState({
+    slackOauthStatus,
+    doesSlackIntegrationExist,
+  });
+  if (
+    prevSync.slackOauthStatus !== slackOauthStatus ||
+    prevSync.doesSlackIntegrationExist !== doesSlackIntegrationExist
+  ) {
+    setPrevSync({ slackOauthStatus, doesSlackIntegrationExist });
+    if (
+      !doesSlackIntegrationExist &&
+      slackOauthStatus.status === 'authenticated'
+    ) {
+      setSlackIntegrationStatus({ status: 'idle' });
+    } else {
+      setSlackIntegrationStatus(slackOauthStatus);
+    }
+  }
+
+  return (
+    <div className="-ml-4">
+      <AlertHeader
+        icon={<FaBell className="w-9 h-9 mr-4 mt-2 fill-current" />}
+        title="Slack Alerts"
+        description="Integrate with a Slack channel to enable alerts."
+      />
+
+      {doesSlackIntegrationExist ? (
+        <SlackIntegrationStatusTile
+          status={{
+            status: 'authenticated',
+            channelName: slackChannel,
+            teamName: slackTeam,
+          }}
+          onAction={onDelete}
+        />
+      ) : (
+        <SlackIntegrationState
+          slackIntegrationStatus={slackIntegrationStatus}
+          onIntegrationSlack={onIntegrateSlack}
+          onDelete={onDelete}
+          onDismiss={onDismiss}
+        />
+      )}
+      {isSlackDeleteConfirmationModalOpen && (
+        <SlackDeleteConfirmationDialog
+          onClose={() => setIsSlackDeleteConfirmationModalOpen(false)}
+          onSubmit={onDeleteSlack}
+        />
+      )}
+    </div>
+  );
+};

@@ -1,37 +1,42 @@
 module Hasura.Server.CheckUpdates
-  ( checkForUpdates
-  ) where
+  ( checkForUpdates,
+  )
+where
 
-import           Control.Exception     (try)
-import           Control.Lens
-import           Data.Text.Conversions (toText)
+import CI qualified
+import Control.Concurrent.Extended qualified as C
+import Control.Exception (try)
+import Control.Lens
+import Data.Aeson qualified as J
+import Data.Aeson.Casing qualified as J
+import Data.Either (fromRight)
+import Data.Text qualified as T
+import Data.Text.Conversions (toText)
+import Hasura.HTTP
+import Hasura.Logging (LoggerCtx, getLoggerSet)
+import Hasura.Prelude
+import Hasura.Server.Version (Version, currentVersion)
+import Network.HTTP.Client qualified as HTTP
+import Network.URI.Encode qualified as URI
+import Network.Wreq qualified as Wreq
+import System.Log.FastLogger qualified as FL
 
-import qualified CI
-import qualified Control.Concurrent.Extended as C
-import qualified Data.Aeson                  as A
-import qualified Data.Aeson.Casing           as A
-import qualified Data.Aeson.TH               as A
-import qualified Data.Text                   as T
-import qualified Network.HTTP.Client         as H
-import qualified Network.URI.Encode          as URI
-import qualified Network.Wreq                as Wreq
-import qualified System.Log.FastLogger       as FL
-
-import           Hasura.HTTP
-import           Hasura.Logging        (LoggerCtx (..))
-import           Hasura.Prelude
-import           Hasura.Server.Version (HasVersion, Version, currentVersion)
-
-
-newtype UpdateInfo
-  = UpdateInfo
+newtype UpdateInfo = UpdateInfo
   { _uiLatest :: Version
-  } deriving (Show)
+  }
+  deriving (Show, Generic)
 
-$(A.deriveJSON (A.aesonDrop 2 A.snakeCase) ''UpdateInfo)
+-- note that this is erroneous and should drop three characters or use
+-- aesonPrefix, but needs to remain like this for backwards compatibility
+instance J.FromJSON UpdateInfo where
+  parseJSON = J.genericParseJSON (J.aesonDrop 2 J.snakeCase)
 
-checkForUpdates :: HasVersion => LoggerCtx a -> H.Manager -> IO void
-checkForUpdates (LoggerCtx loggerSet _ _ _) manager = do
+instance J.ToJSON UpdateInfo where
+  toJSON = J.genericToJSON (J.aesonDrop 2 J.snakeCase)
+  toEncoding = J.genericToEncoding (J.aesonDrop 2 J.snakeCase)
+
+checkForUpdates :: LoggerCtx a -> HTTP.Manager -> IO void
+checkForUpdates ctx manager = do
   let options = wreqOptions manager []
   url <- getUrl
   forever $ do
@@ -40,25 +45,27 @@ checkForUpdates (LoggerCtx loggerSet _ _ _) manager = do
       Left ex -> ignoreHttpErr ex
       Right bs -> do
         UpdateInfo latestVersion <- decodeResp $ bs ^. Wreq.responseBody
-        when (latestVersion /= currentVersion) $
-          FL.pushLogStrLn loggerSet $ FL.toLogStr $ updateMsg latestVersion
+        when (latestVersion /= currentVersion)
+          $ FL.pushLogStrLn (getLoggerSet ctx)
+          $ FL.toLogStr
+          $ updateMsg latestVersion
 
     C.sleep $ days 1
-
   where
     updateMsg v = "Update: A new version is available: " <> toText v
     getUrl = do
-      let buildUrl agent = "https://releases.hasura.io/graphql-engine?agent=" <>
-                           agent <> "&version=" <> URI.encodeText (toText currentVersion)
+      let buildUrl agent =
+            "https://releases.hasura.io/graphql-engine?agent="
+              <> agent
+              <> "&version="
+              <> URI.encodeText (toText currentVersion)
       ciM <- CI.getCI
       return . buildUrl $ case ciM of
         Nothing -> "server"
-        Just ci -> "server-" <> (T.toLower . T.pack $ show ci)
+        Just ci -> "server-" <> T.toLower (tshow ci)
 
     -- ignoring if there is any error in response and returning the current version
-    decodeResp bs = case A.eitherDecode bs of
-      Left _  -> return $ UpdateInfo currentVersion
-      Right a -> return a
+    decodeResp = pure . fromRight (UpdateInfo currentVersion) . J.eitherDecode
 
-    ignoreHttpErr :: H.HttpException -> IO ()
+    ignoreHttpErr :: HTTP.HttpException -> IO ()
     ignoreHttpErr _ = return ()

@@ -1,0 +1,34 @@
+- description: call the simple endpoint to write to the cache
+  url: /v1/graphql
+  status: 200
+  query:
+    query: |
+      query @cached(ttl: 300) {
+        test_table {
+          first_name
+          last_name
+        }
+      }
+  resp_headers:
+    Cache-Control: max-age=300
+    X-Hasura-Query-Cache-Key: d4a71d5adf16ade24aef3c86a6db2a60c2bbf303
+    X-Hasura-Query-Family-Cache-Key: 5370009b358ff0d7725a05b0e999d28b16725671
+  response:
+    data:
+      test_table:
+        - first_name: Foo
+          last_name: Bar
+        - first_name: Baz
+          last_name: Qux
+        - first_name: X%20Y
+          last_name: Test
+
+- description: call the metrics endpoint
+  url: /pro/cache/metrics
+  method: GET
+  status: 200
+  query:
+  response:
+    5370009b358ff0d7725a05b0e999d28b16725671:
+      misses: 1
+      hits: null

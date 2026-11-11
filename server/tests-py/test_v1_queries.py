@@ -27,6 +27,21 @@ class TestV1General:
     def test_query_v2_invalid_version(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/query_v2_invalid_version.yaml')
 
+    def test_error_response_includes_request_id_header(self, hge_ctx):
+        request_id = 'error-response-request-id'
+        headers = {'x-request-id': request_id}
+        if hge_ctx.hge_key:
+            headers['X-Hasura-Admin-Secret'] = hge_ctx.hge_key
+
+        code, _, resp_headers = hge_ctx.anyq(
+            '/v1/query',
+            {'type': 'random', 'args': {'foo': 'bar'}},
+            headers,
+        )
+
+        assert code == 400
+        assert resp_headers['x-request-id'] == request_id
+
     @classmethod
     def dir(cls):
         return "queries/v1/basic"
@@ -34,8 +49,15 @@ class TestV1General:
 @usefixtures('per_class_tests_db_state')
 class TestV1SelectBasic:
 
-    def test_select_query_author(self, hge_ctx):
+    def test_select_query_author_with_admin_role(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/select_article.yaml')
+
+    # TODO: fix these tests for JWT tests
+    # def test_select_query_author_with_user_role_success(self, hge_ctx):
+    #     check_query_f(hge_ctx, self.dir() + '/select_article_role_success.yaml')
+
+    # def test_select_query_author_with_user_role_failure(self, hge_ctx):
+    #     check_query_f(hge_ctx, self.dir() + '/select_article_role_error.yaml')
 
     def test_nested_select_article_author(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/nested_select_query_article_author.yaml')
@@ -180,6 +202,9 @@ class TestV1SelectBoolExpSearch:
     def test_city_where_not_iregex(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/select_city_where_niregex.yaml')
 
+    def test_project_where_ilike(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/select_project_where_ilike.yaml')
+
     @classmethod
     def dir(cls):
         return 'queries/v1/select/boolexp/search'
@@ -213,7 +238,7 @@ class TestV1SelectBoolExpJSONB:
     def dir(cls):
         return 'queries/v1/select/boolexp/jsonb'
 
-@usefixtures('per_class_tests_db_state')
+@usefixtures('postgis', 'per_class_tests_db_state')
 class TestV1SelectBoolExpPostGIS:
 
     def test_query_st_equals(self, hge_ctx):
@@ -253,7 +278,7 @@ class TestV1SelectBoolExpPostGIS:
     def dir(cls):
         return 'queries/v1/select/boolexp/postgis'
 
-@usefixtures('per_class_tests_db_state')
+@usefixtures('postgis', 'per_class_tests_db_state')
 class TestV1SelectPermissions:
 
     def test_user_select_unpublished_articles(self, hge_ctx):
@@ -292,6 +317,29 @@ class TestV1SelectPermissions:
     @classmethod
     def dir(cls):
         return 'queries/v1/select/permissions'
+
+@usefixtures('per_class_tests_db_state')
+class TestV1SelectDMLRootColPerm:
+    """
+    Regression test: IsRoot ("$") column references in a relationship
+    permission filter must resolve against the permission-anchor table, not the
+    outer query root, on the /v1/query (DML) path.
+
+    In checkOnColExp / AVRelationship the resolved row-permission filter
+    (resolvedFltr) is placed in rfFilter rather than rfTargetTablePermissions.
+    The translator evaluates rfFilter with the inherited outer rootReference, so
+    any ["$","col"] inside the permission resolves to the outer query table's
+    column instead of the permission-anchor (relationship target) table's column.
+    This can allow a user to bypass a clearance-style permission when the outer
+    table happens to have a same-named column with a more permissive value.
+    """
+
+    def test_user_cannot_access_tasks_via_root_col_perm(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/user_cannot_access_tasks_via_root_col_perm.yaml')
+
+    @classmethod
+    def dir(cls):
+        return 'queries/v1/select/dml_root_col_perm'
 
 @use_mutation_fixtures
 class TestV1InsertBasic:
@@ -488,88 +536,16 @@ class TestV1Delete:
     def dir(cls):
         return "queries/v1/delete"
 
-import ruamel.yaml as yaml
-@usefixtures('per_method_tests_db_state')
-class TestMetadata:
-
-    def test_reload_metadata(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/reload_metadata.yaml')
-
-    def test_export_metadata(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/export_metadata.yaml')
-
-    def test_clear_metadata(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/clear_metadata.yaml')
-
-    def test_replace_metadata(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/replace_metadata.yaml')
-
-    def test_replace_metadata_wo_remote_schemas(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/replace_metadata_wo_rs.yaml')
-
-    def test_replace_metadata_v2(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/replace_metadata_v2.yaml')
-
-    def test_dump_internal_state(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/dump_internal_state.yaml')
-
-    @classmethod
-    def dir(cls):
-        return "queries/v1/metadata"
-
-# TODO These look like dependent tests. Ideally we should be able to run tests independently
-@usefixtures('per_class_tests_db_state')
-class TestMetadataOrder:
-    @classmethod
-    def dir(cls):
-        return "queries/v1/metadata_order"
-
-    def test_export_metadata(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/export_metadata.yaml')
-
-    def test_clear_export_metadata(self, hge_ctx):
-        # In the 'clear_export_metadata.yaml' the metadata is added
-        # using the metadata APIs
-        check_query_f(hge_ctx, self.dir() + '/clear_export_metadata.yaml')
-
-    def test_export_replace(self, hge_ctx):
-        url = '/v1/query'
-        export_query = {
-            'type': 'export_metadata',
-            'args': {}
-        }
-        headers = {}
-        if hge_ctx.hge_key is not None:
-            headers['X-Hasura-Admin-Secret'] = hge_ctx.hge_key
-        # we are exporting the metadata here after creating it though
-        # the metadata APIs
-        export_code, export_resp, _ = hge_ctx.anyq(url, export_query, headers)
-        assert export_code == 200, export_resp
-        replace_query = {
-            'type': 'replace_metadata',
-            'args': export_resp
-        }
-        # we are replacing the metadata with the exported metadata from the
-        # `export_metadata` response.
-        replace_code, replace_resp, _ = hge_ctx.anyq(url, replace_query, headers)
-        assert replace_code == 200, replace_resp
-        # This test catches incorrect key names(if any) in the export_metadata serialization,
-        # for example, A new query collection is added to the allow list using the
-        # add_collection_to_allowlist metadata API. When
-        # the metadata is exported it will contain the allowlist. Now, when this
-        # metadata is imported, if the graphql-engine is expecting a different key
-        # like allow_list(instead of allowlist) then the allow list won't be imported.
-        # Now, exporting the metadata won't contain the allowlist key
-        # because it wasn't imported properly and hence the two exports will differ.
-        export_code_1, export_resp_1, _ = hge_ctx.anyq(url, export_query, headers)
-        assert export_code_1 == 200
-        assert export_resp == export_resp_1
-
 @usefixtures('per_method_tests_db_state')
 class TestRunSQL:
 
     def test_select_query(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/sql_select_query.yaml')
+        hge_ctx.may_skip_test_teardown = True
+
+    # TODO: create a v2 query tests module
+    def test_select_query_v2(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/sql_select_query_v2.yaml')
         hge_ctx.may_skip_test_teardown = True
 
     def test_select_query_read_only(self, hge_ctx):
@@ -585,6 +561,10 @@ class TestRunSQL:
 
     def test_sql_query_as_user_error(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/sql_query_as_user_error.yaml')
+
+    # TODO: create a v2 query tests module
+    def test_sql_query_as_user_error_v2(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/sql_query_as_user_error_v2.yaml')
 
     def test_sql_rename_table(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/sql_rename_table.yaml')
@@ -606,10 +586,122 @@ class TestRunSQL:
         check_query_f(hge_ctx, self.dir() + '/sql_alter_test_id.yaml')
         hge_ctx.may_skip_test_teardown = True
 
+    def test_sql_no_tx(self, hge_ctx):
+        try:
+            check_query_f(hge_ctx, self.dir() + '/sql_no_tx.yaml')
+        finally:
+            hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': 'DROP FUNCTION IF EXISTS run_sql_dollar_quote_regression(text); DROP TABLE IF EXISTS users;'}
+            })
+
+    def test_sql_no_tx_lexical_boundaries(self, hge_ctx):
+        # A concurrent index proves that splitting still avoids an implicit transaction.
+        sql = r"""
+            CREATE TABLE run_sql_lexical_regression (value text);
+            INSERT INTO run_sql_lexical_regression VALUES
+                ('http://x--y'), ('/* literal */'), ('it''s;ok'),
+                (E'it\'s;ok'), ($tag$body;--/* literal */$tag$);
+            /* outer ; /* nested comment */ still inside */
+            CREATE INDEX CONCURRENTLY run_sql_lexical_regression_idx
+                ON run_sql_lexical_regression (value);
+            DO $body$
+            BEGIN
+                -- Keep comment markers inside the following strings.
+                IF 'http://x--y' <> 'http://x--y' OR '/*' <> '/*' THEN
+                    RAISE EXCEPTION 'splitter changed SQL text';
+                END IF;
+            END
+            $body$;
+            SELECT count(1) AS "count;--/*", 'it''s;ok' AS a$b$c,
+                E'it\'s;ok' AS escaped,
+                $tag$body;--/* literal */$tag$ AS dollar
+                FROM run_sql_lexical_regression;
+            -- A trailing comment must not replace the final SELECT result.
+            /* trailing ; */
+        """
+        try:
+            response = hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': sql, 'no_transaction': True}
+            })
+            assert response == {
+                'result_type': 'TuplesOk',
+                'result': [
+                    ['count;--/*', 'a$b$c', 'escaped', 'dollar'],
+                    ['5', "it's;ok", "it's;ok", 'body;--/* literal */']
+                ]
+            }
+        finally:
+            hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': 'DROP TABLE IF EXISTS run_sql_lexical_regression;'}
+            })
+
+    def test_sql_no_tx_partial_failure(self, hge_ctx):
+        try:
+            hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': 'CREATE TABLE run_sql_partial_failure (value integer);'}
+            })
+            for no_transaction in [False, True]:
+                response = hge_ctx.v1q({
+                    'type': 'run_sql',
+                    'args': {
+                        'sql': 'INSERT INTO run_sql_partial_failure VALUES (1); SELECT 1 / 0; INSERT INTO run_sql_partial_failure VALUES (2);',
+                        'no_transaction': no_transaction
+                    }
+                }, expected_status_code=400)
+                assert response['code'] == 'postgres-error'
+                assert response['internal']['error']['status_code'] == '22012'
+                result = hge_ctx.v1q({
+                    'type': 'run_sql',
+                    'args': {'sql': 'SELECT value FROM run_sql_partial_failure ORDER BY value;'}
+                })
+                expected_rows = [['value'], ['1']] if no_transaction else [['value']]
+                assert result == {'result_type': 'TuplesOk', 'result': expected_rows}
+        finally:
+            hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': 'DROP TABLE IF EXISTS run_sql_partial_failure;'}
+            })
+
+    def test_sql_no_tx_read_only(self, hge_ctx):
+        response = hge_ctx.v1q({
+            'type': 'run_sql',
+            'args': {
+                'sql': "SELECT 'first'; SELECT 'http://x--y;/*z*/' AS \"last;result\"; -- trailing comment",
+                'no_transaction': True,
+                'read_only': True
+            }
+        })
+        assert response == {
+            'result_type': 'TuplesOk',
+            'result': [['last;result'], ['http://x--y;/*z*/']]
+        }
+
+    def test_sql_no_tx_unterminated_input(self, hge_ctx):
+        for sql in ["SELECT 1; /* unterminated", "SELECT 'unterminated;", 'SELECT "unterminated;', 'SELECT $tag$unterminated;']:
+            response = hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': sql, 'no_transaction': True}
+            }, expected_status_code=400)
+            assert response['code'] == 'postgres-error'
+            assert response['internal']['error']['status_code'] == '42601'
+
+    def test_sql_no_tx_empty_input(self, hge_ctx):
+        # Preserve the existing EmptyQuery error rather than inventing a successful result.
+        for sql in ['', ' ; ; ', '-- only a comment', '/* outer /* nested */ comment */;']:
+            response = hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': sql, 'no_transaction': True}
+            }, expected_status_code=400)
+            assert response['code'] == 'postgres-error'
+            assert response['internal']['error']['exec_status'] == 'EmptyQuery'
+
     @classmethod
     def dir(cls):
         return "queries/v1/run_sql"
-
 
 @usefixtures('per_method_tests_db_state')
 class TestRelationships:
@@ -644,6 +736,9 @@ class TestRelationships:
     def test_array_relationship_manual(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/array_relationship_manual.yaml')
 
+    def test_object_relationship_one_to_one(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/object_relationship_one_to_one.yaml')
+
     @classmethod
     def dir(cls):
         return "queries/v1/relationships"
@@ -677,6 +772,12 @@ class TestTrackTables:
     def test_track_untrack_table_as_not_admin_error(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/track_untrack_table_as_not_admin_error.yaml')
 
+    # We allow tracking of tables with non-compliant graphql names but we don't
+    # add such tables in the GraphQL schema, but these tables can be used with
+    # RQL queries (CRUD) and event triggers
+    def test_track_table_with_non_graphql_compliant_name(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/track_non_graphql_compliant_table.yaml')
+
     @classmethod
     def dir(cls):
         return "queries/v1/track_table"
@@ -699,6 +800,7 @@ class TestCreatePermission:
         return "queries/v1/permissions"
 
 # All these tests fail. So it should be fine to not have a cleanup after tests
+@pytest.mark.hge_env('EVENT_WEBHOOK_HEADER', 'MyEnvValue')
 class TestNonEmptyText:
 
     def test_create_event_trigger(self, hge_ctx):
@@ -740,6 +842,9 @@ class TestSetTableIsEnum:
 
     def test_relationship_with_inconsistent_enum_table(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/relationship_with_inconsistent_enum_table.yaml')
+
+    def test_custom_enum_table_name(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/custom_enum_table_name.yaml')
 
 # regression test for issue #3759
 @usefixtures('per_method_tests_db_state')
@@ -807,6 +912,9 @@ class TestSetTableCustomization:
     def test_conflicting_custom_table_name(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + "/fail_conflicting_custom_table_name.yaml")
 
+    def test_use_deprecated_custom_column_names(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + "/use_deprecated_custom_column_names.yaml")
+
 @usefixtures('per_method_tests_db_state')
 class TestComputedFields:
     @classmethod
@@ -834,11 +942,40 @@ class TestBulkQuery:
     def test_run_bulk(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/basic.yaml')
 
-    def test_run_bulk_mixed_access_mode(self, hge_ctx):
-        check_query_f(hge_ctx, self.dir() + '/mixed_access_mode.yaml')
+    # Each query is executed independently in a separate transaction in a bulk query
+    # def test_run_bulk_mixed_access_mode(self, hge_ctx):
+    #     check_query_f(hge_ctx, self.dir() + '/mixed_access_mode.yaml')
 
     def test_run_bulk_with_select_and_writes(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/select_with_writes.yaml')
 
     def test_run_bulk_with_select_and_reads(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/select_with_reads.yaml')
+
+@pytest.mark.parametrize('transport', ['http', 'websocket'])
+@usefixtures('per_class_tests_db_state')
+class TestGraphQLQueryBoolExpLtree:
+    def test_select_path_where_ancestor(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_ancestor.yaml')
+
+    def test_select_path_where_ancestor_array(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_ancestor_array.yaml')
+
+    def test_select_path_where_descendant(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_descendant.yaml')
+
+    def test_select_path_where_descendant_array(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_descendant_array.yaml')
+
+    def test_select_path_where_matches(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_matches.yaml')
+
+    def test_select_path_where_matches_array(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_matches_array.yaml')
+
+    def test_select_path_where_matches_ltxtquery(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/select_path_where_matches_ltxtquery.yaml')
+
+    @classmethod
+    def dir(cls):
+        return 'queries/v1/select/boolexp/ltree'

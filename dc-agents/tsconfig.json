@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  },
+  "include": ["scripts/**/*"]
+}

@@ -16,7 +16,7 @@ Hasura помогает строить GraphQL приложения при по�
 
 ------------------
 
-![Hasura GraphQL Engine Demo](../assets/demo.gif)
+![Hasura GraphQL Engine Demo](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -76,7 +76,7 @@ Hasura помогает строить GraphQL приложения при по�
 
 3. Сделайте свой первый GraphQL-запрос
 
-   Создайте таблицу и сразу же выполните свой первый запрос. Следуйте следующим указаниям [простое руководство](https://hasura.io/docs/1.0/graphql/manual/getting-started/first-graphql-query.html).
+   Создайте таблицу и сразу же выполните свой первый запрос. Следуйте следующим указаниям [простое руководство](https://hasura.io/docs/latest/graphql/core/getting-started/first-graphql-query.html).
 
 ### Другие варианты деплоймента одним кликом
 
@@ -84,12 +84,12 @@ Hasura помогает строить GraphQL приложения при по�
 
 | **Infra provider** | **One-click link** | **Additional information** |
 |:------------------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:-------------------------------------------------------------------------------------------------------------------------------------------------:|
-| DigitalOcean | [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [docs](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
-| Azure | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [docs](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/azure-container-instances-postgres.html) |
+| DigitalOcean | [![Deploy to DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [docs](https://hasura.io/docs/latest/graphql/core/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
+| Azure | [![Deploy to Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [docs](https://hasura.io/docs/latest/graphql/core/guides/deployment/azure-container-instances-postgres.html) |
 
 ### Другие методы деплоймента
 
-Для методов деплоймента на базе Docker и расширенных опций конфигурации, ознакомьтесь с [руководство по деплойменту](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) или
+Для методов деплоймента на базе Docker и расширенных опций конфигурации, ознакомьтесь с [руководство по деплойменту](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) или
 [установока манифестов](../install-manifests).
 
 ## Архитектура
@@ -119,29 +119,29 @@ GraphQL Engine предоставляет простые в обосновани
 
 ### Полученные данные или трансформация данных
 
-Преобразование данных в Postgres или запуск бизнес-логики для получения другого набора данных, который можно запросить с помощью GraphQL Engine. - [подробнее](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+Преобразование данных в Postgres или запуск бизнес-логики для получения другого набора данных, который можно запросить с помощью GraphQL Engine. - [подробнее](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## Demos
 
 Ознакомьтесь со всеми примерами приложений в 
-[community/examples](../community/sample-apps) папке.
+[community/examples](https://github.com/hasura/sample-apps/tree/main) папке.
 
 ### Приложения в режиме реального времени
 
 - Приложение группового чата, построенное с помощью React, включает в себя индикатор набора текста, онлайн пользователей и уведомления о сообщениях.
-  - [Попробуйте это](https://realtime-chat.demo.hasura.app/)
-  - [Руководство](../community/sample-apps/realtime-chat)
-  - [Просмотреть API](https://realtime-chat.demo.hasura.app/console)
+  - [Попробуйте это](https://realtime-chat.demo.hasura.io/)
+  - [Руководство](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Просмотреть API](https://realtime-chat.demo.hasura.io/console)
 
 - Приложение для отслеживания местоположения в реальном времени, показывающее движущееся транспортное средство, изменяющее текущие GPS-координаты, движущееся по карте.
-  - [Попробуйте это](https://realtime-location-tracking.demo.hasura.app/)
-  - [Руководство](../community/sample-apps/realtime-location-tracking)
-  - [Просмотреть API](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Попробуйте это](https://realtime-location-tracking.demo.hasura.io/)
+  - [Руководство](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Просмотреть API](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Информационная панель в режиме реального времени для агрегирования данных по постоянно меняющимся данным.
-  - [Попробуйте это](https://realtime-poll.demo.hasura.app/)
-  - [Руководство](../community/sample-apps/realtime-poll)
-  - [Просмотреть API](https://realtime-poll.demo.hasura.app/console)
+  - [Попробуйте это](https://realtime-poll.demo.hasura.io/)
+  - [Руководство](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Просмотреть API](https://realtime-poll.demo.hasura.io/console)
 
 ### Видео
 
@@ -174,19 +174,19 @@ GraphQL Engine предоставляет простые в обосновани
 Мы были бы рады, если бы вы добавили "Powered by Hasura" бейдж к вашим приложениям, построенным с помощью Hasura.. ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- Для светлых фонов -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- Для темных фонов -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

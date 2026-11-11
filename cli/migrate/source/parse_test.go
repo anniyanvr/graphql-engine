@@ -2,17 +2,22 @@ package source
 
 import (
 	"testing"
+
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParse(t *testing.T) {
 	tt := []struct {
 		name            string
-		expectErr       error
+		wantErr         bool
+		assertErr       require.ErrorAssertionFunc
 		expectMigration *Migration
 	}{
 		{
 			name:      "1_foobar.up.sql",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1,
 				Identifier: "foobar",
@@ -21,7 +26,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "1_foobar.up.yaml",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1,
 				Identifier: "foobar",
@@ -30,7 +36,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "1_foobar.down.sql",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1,
 				Identifier: "foobar",
@@ -39,7 +46,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "1_foobar.down.yaml",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1,
 				Identifier: "foobar",
@@ -48,7 +56,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "1_f-o_ob+ar.up.sql",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1,
 				Identifier: "f-o_ob+ar",
@@ -57,7 +66,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "1485385885_foobar.up.sql",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    1485385885,
 				Identifier: "foobar",
@@ -66,7 +76,8 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:      "20170412214116_date_foobar.up.sql",
-			expectErr: nil,
+			wantErr:   false,
+			assertErr: require.NoError,
 			expectMigration: &Migration{
 				Version:    20170412214116,
 				Identifier: "date_foobar",
@@ -74,46 +85,89 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
-			name:            "-1_foobar.up.sql",
-			expectErr:       ErrParse,
+			name:    "-1_foobar.up.sql",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 		{
-			name:            "foobar.up.sql",
-			expectErr:       ErrParse,
+			name:    "foobar.up.sql",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 		{
-			name:            "1.up.sql",
-			expectErr:       ErrParse,
+			name:    "1.up.sql",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 		{
-			name:            "1_foobar.sql",
-			expectErr:       ErrParse,
+			name:    "1_foobar.sql",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 		{
-			name:            "1_foobar.up",
-			expectErr:       ErrParse,
+			name:    "1_foobar.up",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 		{
-			name:            "1_foobar.down",
-			expectErr:       ErrParse,
+			name:    "1_foobar.down",
+			wantErr: true,
+			assertErr: require.ErrorAssertionFunc(
+				func(tt require.TestingT, err error, i ...interface{}) {
+					require.IsType(t, &errors.Error{}, err)
+					e := err.(*errors.Error)
+					require.Equal(t, e.Err, ErrParse)
+				},
+			),
 			expectMigration: nil,
 		},
 	}
 
-	for i, v := range tt {
-		f, err := Parse(v.name)
-
-		if err != v.expectErr {
-			t.Errorf("expected %v, got %v, in %v", v.expectErr, err, i)
-		}
-
-		if v.expectMigration != nil && *f != *v.expectMigration {
-			t.Errorf("expected %+v, got %+v, in %v", *v.expectMigration, *f, i)
-		}
+	for i, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := Parse(tc.name)
+			tc.assertErr(t, err)
+			if tc.wantErr {
+				return
+			}
+			if *f != *tc.expectMigration {
+				t.Errorf("expected %+v, got %+v, in %v", *tc.expectMigration, *f, i)
+			}
+		})
 	}
 }

@@ -1,54 +1,96 @@
 package util
 
 import (
-	"errors"
-	"strings"
-
-	"github.com/manifoldco/promptui"
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 )
 
-const (
-	INVALID_YES_NO_RESP_ERROR = "invalid response, please enter Y or N"
-)
+func GetYesNoPrompt(message string) (promptResp bool, err error) {
+	var op errors.Op = "util.GetYesNoPrompt"
 
-func GetYesNoPrompt(message string) (promptResp string, err error) {
-	prompt := promptui.Prompt{
-		Label: message + " (y/n)",
-		Validate: func(_resp string) (err error) {
-			if len(_resp) == 0 {
-				err = errors.New(INVALID_YES_NO_RESP_ERROR)
-				return
-			}
-			resp := strings.ToLower(_resp)
-			if resp != "n" && resp != "y" && resp != "no" && resp != "yes" {
-				err = errors.New(INVALID_YES_NO_RESP_ERROR)
-			}
-			return err
-		},
-		Default: "y",
+	prompt := &survey.Confirm{
+		Message: message,
+		Default: true,
 	}
-	promptResp, err = prompt.Run()
+
+	err = survey.AskOne(prompt, &promptResp)
 	if err != nil {
-		return
+		return promptResp, errors.E(op, err)
 	}
-	promptResp = string(strings.ToLower(promptResp)[0])
-	return
+
+	return promptResp, nil
 }
 
 func GetSelectPrompt(message string, options []string) (selection string, err error) {
-	prompt := promptui.Select{
-		Label: message,
-		Items: options,
+	var op errors.Op = "util.GetSelectPrompt"
+
+	prompt := &survey.Select{
+		Message: message,
+		Options: options,
 	}
-	_, selection, err = prompt.Run()
-	return
+
+	err = survey.AskOne(prompt, &selection)
+	if err != nil {
+		return selection, errors.E(op, err)
+	}
+
+	return selection, nil
+}
+
+func GetInputPrompt(message string) (input string, err error) {
+	var op errors.Op = "util.GetInputPrompt"
+
+	prompt := &survey.Input{
+		Message: message,
+	}
+
+	err = survey.AskOne(prompt, &input)
+	if err != nil {
+		return input, errors.E(op, err)
+	}
+
+	return input, nil
+}
+
+func GetInputPromptWithDefault(message string, def string) (input string, err error) {
+	var op errors.Op = "util.GetInputPromptWithDefault"
+
+	prompt := &survey.Input{
+		Message: message,
+		Default: def,
+	}
+
+	err = survey.AskOne(prompt, &input)
+	if err != nil {
+		return input, errors.E(op, err)
+	}
+
+	return input, nil
+}
+
+func validateDirPath(a any) error {
+	var op errors.Op = "util.validateDirPath"
+
+	err := FSCheckIfDirPathExists(a.(string))
+	if err != nil {
+		return errors.E(op, err)
+	}
+
+	return nil
 }
 
 func GetFSPathPrompt(message string, def string) (input string, err error) {
-	prompt := promptui.Prompt{
-		Label:    message,
-		Validate: FSCheckIfDirPathExists,
-		Default:  def,
+	var op errors.Op = "util.GetFSPathPrompt"
+
+	prompt := &survey.Input{
+		Message: message,
+		Default: def,
 	}
-	return prompt.Run()
+
+	err = survey.AskOne(prompt, &input, survey.WithValidator(validateDirPath))
+	if err != nil {
+		return input, errors.E(op, err)
+	}
+
+	return input, nil
 }

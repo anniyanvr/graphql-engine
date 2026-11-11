@@ -1,0 +1,1 @@
+export { resolveDbLogo } from './resolveDbLogo';

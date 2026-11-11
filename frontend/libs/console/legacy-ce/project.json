@@ -1,0 +1,71 @@
+{
+  "name": "console-legacy-ce",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/console/legacy-ce/src",
+  "projectType": "library",
+  "tags": ["scope:console", "type:feature", "meta:legacy"],
+  "targets": {
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": ["libs/console/legacy-ce/**/*.{ts,tsx,js,jsx,json}"]
+      }
+    },
+    "lint-fix": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "fix": true,
+        "lintFilePatterns": ["libs/console/legacy-ce/**/*.{ts,tsx,js,jsx,json}"]
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "coverage/libs/console/legacy-ce",
+        "configFile": "libs/console/legacy-ce/vite.config.mts"
+      }
+    },
+    "build-storybook": {
+      "outputs": ["{projectRoot}/{options.output-dir}"],
+      "options": {
+        "config-dir": ".storybook",
+        "output-dir": "../../../dist/storybook/console/legacy-ce"
+      },
+      "configurations": {
+        "ci": {
+          "quiet": true
+        }
+      }
+    },
+    "chromatic": {
+      "executor": "@hasura/internal-plugin:chromatic",
+      "dependsOn": ["build-storybook"],
+      "inputs": ["{workspaceRoot}/dist/storybook/console/legacy-ce"]
+    },
+    "test-storybook": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "test-storybook -c libs/console/legacy-ce/.storybook --url=http://localhost:4400"
+      },
+      "configurations": {
+        "ci": {
+          "command": "start-server-and-test 'nx run console-legacy-ce:storybook' 4400 'nx run console-legacy-ce:test-storybook'"
+        }
+      }
+    },
+    "storybook": {
+      "options": {
+        "port": 4400,
+        "config-dir": ".storybook"
+      },
+      "configurations": {
+        "ci": {
+          "args": ["--quiet"]
+        }
+      }
+    }
+  }
+}

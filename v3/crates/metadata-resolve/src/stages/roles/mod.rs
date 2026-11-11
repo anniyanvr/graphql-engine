@@ -1,0 +1,41 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use indexmap::IndexMap;
+use open_dds::permissions::Role;
+
+use open_dds::{commands::CommandName, models::ModelName, types::CustomTypeName};
+
+use crate::types::subgraph::Qualified;
+
+use crate::stages::{command_permissions, model_permissions, object_relationships};
+
+/// Gather all roles from various permission objects.
+pub fn resolve(
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        object_relationships::ObjectTypeWithRelationships,
+    >,
+    models: &IndexMap<Qualified<ModelName>, model_permissions::ModelWithPermissions>,
+    commands: &IndexMap<Qualified<CommandName>, command_permissions::CommandWithPermissions>,
+) -> BTreeSet<Role> {
+    let mut roles = BTreeSet::new();
+    for object_type in object_types.values() {
+        for role in object_type.type_output_permissions.by_role.keys() {
+            roles.insert(role.clone());
+        }
+        for role in object_type.type_input_permissions.by_role.keys() {
+            roles.insert(role.clone());
+        }
+    }
+    for model in models.values() {
+        for role in model.permissions.by_role.keys() {
+            roles.insert(role.clone());
+        }
+    }
+    for command in commands.values() {
+        for role in command.permissions.by_role.keys() {
+            roles.insert(role.clone());
+        }
+    }
+    roles
+}

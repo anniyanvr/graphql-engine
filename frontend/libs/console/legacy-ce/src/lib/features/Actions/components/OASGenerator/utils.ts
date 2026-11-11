@@ -1,0 +1,671 @@
+import { GraphQLObjectType, GraphQLSchema, printSchema } from 'graphql';
+import {
+  CaseStyle,
+  GraphQLOperationType,
+  Oas2,
+  Oas3,
+  createGraphQLSchema,
+  ReferenceObject,
+  SchemaObject,
+  sanitize,
+} from '@hasura/open-api-to-graphql';
+import {
+  DataDefinition,
+  GeneratedAction,
+  OASError,
+  Operation,
+  OperationParameters,
+  Result,
+  SubDefinition,
+} from './types';
+import { camelize } from 'inflection';
+import { formatGraphQL } from '@hasura/shared/utils';
+import {
+  ActionRequestTransform,
+  RequestTransformBody,
+  RequestTransformMethod,
+  ResponseTransform,
+} from '@hasura/shared/types';
+import { ActionState } from '../../types';
+import { getActionRequestSampleInput } from '../Form/utils';
+
+const parseRequestMethod = (method: string): RequestTransformMethod => {
+  switch (method.toLowerCase()) {
+    case 'get':
+      return 'GET';
+    case 'post':
+      return 'POST';
+    case 'put':
+      return 'PUT';
+    case 'delete':
+      return 'DELETE';
+    case 'patch':
+      return 'PATCH';
+    default:
+      return 'GET';
+  }
+};
+
+const lastOfArray = (arr: string[]): string => {
+  return arr[arr.length - 1];
+};
+
+const formatQuery = (query?: string): string => {
+  try {
+    return !query || query.trim() === '' ? '' : formatGraphQL(query);
+  } catch (e) {
+    return query ?? '';
+  }
+};
+
+const isSchemaObject = (
+  schema: SchemaObject | ReferenceObject | undefined,
+): schema is SchemaObject => schema !== undefined && 'type' in schema;
+
+// {{ concat ([concat({{ range _, x := ["apple", "banana"] }} "tags={{x}}&" {{ end }})]) }}
+export const generateQueryParams = (parameters: OperationParameters) => {
+  const isThereArray = parameters.some((parameter) => {
+    return (
+      isSchemaObject(parameter?.schema) && parameter.schema.type === 'array'
+    );
+  });
+  if (isThereArray) {
+    const stringParams = parameters.map((param) => {
+      if (isSchemaObject(param?.schema) && param.schema.type === 'array') {
+        return `{{ if empty($body.input?.${param.name}) }} [] {{ else }} concat({{ range _, x := $body.input?.${param.name} }} "${param.name}={{x}}&" {{ end }}) {{ end }}`;
+      }
+      return `"${param.name}={{$body.input?.${param.name}}}&"`;
+    });
+
+    return `{{ concat ([${stringParams.join(', ')}]) }}`.replace(/&&/, '&');
+  }
+  const parameterNames =
+    parameters
+      ?.filter((param) => param.in === 'query')
+      ?.map((param) => param.name) || [];
+  return parameterNames.map((name) => ({
+    name,
+    value: `{{$body.input?.${name}}}`,
+  }));
+};
+
+export const normalizeOperationId = (str: string) =>
+  camelize(str.replace(/[-\s]+/g, '_'), true);
+
+/**
+ * name of the GraphQL field generated for the OpenAPI property `name`. It
+ * must follow open-api-to-graphql's own naming (we don't set `simpleNames`),
+ * otherwise the transforms read and write fields that don't exist
+ */
+const toGraphQLFieldName = (name: string, definition?: DataDefinition) => {
+  const extensionFieldName = (
+    definition?.schema as Record<string, unknown> | undefined
+  )?.['x-graphql-field-name'];
+  return typeof extensionFieldName === 'string' && extensionFieldName
+    ? extensionFieldName
+    : sanitize(name, CaseStyle.camelCase);
+};
+
+/**
+ * an array in a transform: every element of `source` is bound to `variable`
+ * and rendered through `item`
+ */
+class ArrayTransform {
+  constructor(
+    readonly variable: string,
+    readonly source: string,
+    readonly item: TransformNode,
+  ) {}
+}
+
+type TransformNode =
+  // a Kriti expression, e.g. `{{$body?['id']}}`
+  string | ArrayTransform | { [key: string]: TransformNode };
+
+interface Transform {
+  transform: TransformNode;
+  needTransform: boolean;
+}
+
+/**
+ * name of the `range` loop variable for the items of `name`. It must be a
+ * valid Kriti identifier that can't clash with a keyword (`end`, `range`...)
+ * or with the `item` variable of a root array, hence the `Item` suffix
+ */
+const toLoopVariable = (fieldName: string) => {
+  const identifier = fieldName.replace(/[^A-Za-z0-9_]/g, '_');
+  return /^[A-Za-z]/.test(identifier)
+    ? `${identifier}Item`
+    : `item${identifier}Item`;
+};
+
+const createTransform = (
+  definition: SubDefinition,
+  prefix: string,
+  inverse: boolean,
+  // for an array, the name of the `range` loop variable its items are read
+  // through; root arrays (no enclosing field) use `item`
+  loopVariable = 'item',
+): Transform => {
+  if (Array.isArray(definition)) {
+    // union type not supported at the moment
+    return { transform: {}, needTransform: false };
+  }
+
+  if (
+    definition &&
+    'preferredName' in definition &&
+    typeof definition.preferredName === 'string'
+  ) {
+    const { transform, needTransform } = createTransform(
+      definition.subDefinitions,
+      loopVariable,
+      inverse,
+      // an array of arrays binds its inner items to a new variable
+      `${loopVariable}Item`,
+    );
+    return {
+      transform: new ArrayTransform(loopVariable, prefix, transform),
+      needTransform,
+    };
+  }
+
+  let needTransform = false;
+  const transform = Object.entries(definition).reduce((acc, curr) => {
+    const name = curr[0];
+    const value = curr[1] as DataDefinition;
+
+    const fieldName = toGraphQLFieldName(name, value);
+    const keyFrom = inverse ? fieldName : curr[0];
+    const keyTo = inverse ? curr[0] : fieldName;
+    if (keyFrom !== keyTo) {
+      needTransform = true;
+    }
+    if (
+      value.schema.type === 'object' ||
+      (value.schema.type === 'array' &&
+        'subDefinitions' in value.subDefinitions &&
+        value.subDefinitions.subDefinitions)
+    ) {
+      const {
+        transform: childrenTransform,
+        needTransform: childrenNeedTransform,
+      } = createTransform(
+        value.subDefinitions,
+        `${prefix}?['${keyTo}']`,
+        inverse,
+        toLoopVariable(fieldName),
+      );
+      needTransform = needTransform || childrenNeedTransform;
+      return {
+        ...acc,
+        [keyFrom]: childrenTransform,
+      };
+    }
+    return {
+      ...acc,
+      [keyFrom]: `{{${prefix}?['${keyTo}']}}`,
+    };
+  }, {});
+  return {
+    transform,
+    needTransform,
+  };
+};
+
+const createSampleInput = (
+  definition: SubDefinition,
+): Record<string, unknown> | Record<string, unknown>[] => {
+  try {
+    if (Array.isArray(definition)) {
+      // union type not supported at the moment
+      return {};
+    }
+
+    if (
+      'preferredName' in definition &&
+      typeof definition.preferredName === 'string'
+    ) {
+      return [
+        {
+          ...createSampleInput(definition.subDefinitions),
+        },
+      ];
+    }
+
+    return Object.entries(definition).reduce((acc, curr) => {
+      const name = curr[0];
+      const value = curr[1] as DataDefinition;
+      const keyFrom = toGraphQLFieldName(name, value);
+      const keyTo = curr[0];
+
+      if (
+        value.schema.type === 'object' ||
+        (value.schema.type === 'array' &&
+          'subDefinitions' in value.subDefinitions &&
+          value.subDefinitions.subDefinitions)
+      ) {
+        return {
+          ...acc,
+
+          [keyFrom]: createSampleInput(value.subDefinitions),
+        };
+      }
+      return {
+        ...acc,
+        [keyFrom]: `${keyTo}`,
+      };
+    }, {});
+  } catch (e) {
+    return {};
+  }
+};
+
+const renderTransform = (node: TransformNode, indent = ''): string => {
+  if (typeof node === 'string') {
+    return node;
+  }
+  if (node instanceof ArrayTransform) {
+    return (
+      `{{if inverse(empty(${node.source}))}} ` +
+      `{{ range _, ${node.variable} := ${node.source}}} ` +
+      `${renderTransform(node.item, indent)} ` +
+      '{{end}} {{else}} null {{end}}'
+    );
+  }
+  const entries = Object.entries(node);
+  if (entries.length === 0) {
+    return '{}';
+  }
+  const inner = `${indent}  `;
+  const fields = entries.map(
+    ([key, value]) =>
+      `${inner}${JSON.stringify(key)}: ${renderTransform(value, inner)}`,
+  );
+  return `{\n${fields.join(',\n')}\n${indent}}`;
+};
+
+/**
+ * render the generated transform as a kriti template
+ */
+const postProcessTransform = (output: Transform): string | null => {
+  const { transform, needTransform } = output;
+  if (!needTransform) {
+    return null;
+  }
+  return renderTransform(transform);
+};
+
+const createApplicationJSONRequestTransform = (
+  operation: Operation,
+  inputName: string,
+): GeneratedAction['requestTransforms'] => {
+  const defaultRequestTransform = ['POST', 'PUT', 'PATCH'].includes(
+    operation.method.toUpperCase(),
+  )
+    ? `{{$body.input.${inputName}}}`
+    : '';
+  if (operation.payloadDefinition?.subDefinitions) {
+    return {
+      type: 'json',
+      value:
+        postProcessTransform(
+          createTransform(
+            operation.payloadDefinition.subDefinitions,
+            `$body.input.${inputName}`,
+            false,
+          ),
+        ) ?? defaultRequestTransform,
+    };
+  }
+
+  return {
+    type: 'json',
+    value: '',
+  };
+};
+
+const createXWWWFormURLEncodedRequestTransform = (
+  operation: Operation,
+  inputName: string,
+): GeneratedAction['requestTransforms'] => {
+  if (operation.payloadDefinition?.subDefinitions) {
+    return {
+      type: 'x-www-form-urlencoded',
+      value: Object.entries(operation.payloadDefinition.subDefinitions).reduce(
+        (acc, curr) => {
+          const key = curr[0];
+          const fieldName = toGraphQLFieldName(key, curr[1] as DataDefinition);
+          return {
+            ...acc,
+            [key]: `{{$body.input.${inputName}?.${fieldName}}}`,
+          };
+        },
+        {} as Record<string, string>,
+      ),
+    };
+  }
+  return {
+    type: 'x-www-form-urlencoded',
+    value: {},
+  };
+};
+
+const createRequestTransform = (
+  operation: Operation,
+): GeneratedAction['requestTransforms'] | null => {
+  let inputName: string;
+  const inputObjectType = operation.payloadDefinition?.graphQLInputObjectType;
+  if (inputObjectType && 'name' in inputObjectType) {
+    inputName = normalizeOperationId(inputObjectType.name);
+    if (operation.payloadContentType === 'application/x-www-form-urlencoded') {
+      return createXWWWFormURLEncodedRequestTransform(operation, inputName);
+    }
+    return createApplicationJSONRequestTransform(operation, inputName);
+  }
+  return null;
+};
+
+const createResponseTransform = (operation: Operation): string => {
+  if (operation.responseDefinition?.targetGraphQLType === 'string') {
+    return '{{$body}}';
+  }
+  if (operation.responseDefinition?.subDefinitions) {
+    return (
+      postProcessTransform(
+        createTransform(
+          operation.responseDefinition.subDefinitions,
+          '$body',
+          true,
+        ),
+      ) ?? ''
+    );
+  }
+  return '';
+};
+
+const translateAction = (
+  graphqlSchema: Result,
+  operation: Operation,
+): GeneratedAction => {
+  const { schema } = graphqlSchema;
+
+  const operationDescription = lastOfArray(
+    operation.description.trim().split('\n\n'),
+  );
+
+  // keep only the root field generated for this operation
+  const filterRootType = (type: GraphQLObjectType | null | undefined) => {
+    if (!type) return undefined;
+    const config = type.toConfig();
+    return new GraphQLObjectType({
+      ...config,
+      fields: Object.fromEntries(
+        Object.entries(config.fields).filter(([, field]) =>
+          (field.description ?? '').trim().endsWith(operationDescription),
+        ),
+      ),
+    });
+  };
+
+  // without an explicit `types` list, the schema only collects the types
+  // reachable from its root types, which drops everything else
+  const newSchema = new GraphQLSchema({
+    query: filterRootType(schema.getQueryType()),
+    mutation: filterRootType(schema.getMutationType()),
+  });
+
+  const sdl = printSchema(newSchema);
+
+  const sdlWithoutComments = sdl.replace(/"""[^]*?"""/g, '');
+  // extratct type query from sdl;
+  const typeQuery = sdlWithoutComments.match(/type Query {[^]*?}/g)?.[0];
+  const typeMutation = sdlWithoutComments.match(/type Mutation {[^]*?}/g)?.[0];
+  const action = formatQuery(typeQuery || typeMutation) ?? '';
+
+  // remove type query and type mutation from sdl
+  // Note: when a Query/Mutation type ends up with no fields, graphql-js's
+  // printSchema prints just `type Mutation` / `type Query` with no `{}`
+  // body at all, so the brace-matching patterns above don't remove it. The
+  // trailing patterns below catch that brace-less form; they use `\s*`
+  // (not `\s+`) because the placeholder can be the very last token in the
+  // SDL string with no trailing whitespace to match.
+  const sdlWithoutTypeQuery = formatQuery(
+    sdlWithoutComments
+      .replace(/"""[^]*?"""/g, '')
+      .replace(/type QueryPlaceholder {[^]*?}/g, '')
+      .replace(/type MutationPlaceholder {[^]*?}/g, '')
+      .replace(/type Query {[^]*?}/g, '')
+      .replace(/type Mutation {[^]*?}/g, '')
+      .replace(/type QueryPlaceholder\s*/g, '')
+      .replace(/type MutationPlaceholder\s*/g, '')
+      .replace(/type Query\s*/g, '')
+      .replace(/type Mutation\s*/g, ''),
+  );
+
+  let sampleInput = getActionRequestSampleInput(action, sdlWithoutTypeQuery);
+
+  if (operation.payloadDefinition?.subDefinitions) {
+    sampleInput = {
+      ...sampleInput,
+      input: Object.keys(sampleInput.input).reduce((acc, curr) => {
+        return {
+          ...acc,
+          [curr]:
+            curr.toLowerCase() ===
+            operation.payloadDefinition?.graphQLTypeName.toLowerCase()
+              ? createSampleInput(
+                  operation.payloadDefinition?.subDefinitions ?? {},
+                )
+              : sampleInput.input[curr],
+        };
+      }, {}),
+    };
+  }
+
+  const headers =
+    operation.parameters
+      ?.filter((param) => param.in === 'header')
+      ?.map((param) => param.name) || [];
+
+  const queryParams = generateQueryParams(operation.parameters ?? []);
+
+  return {
+    operationId: operation.operationId,
+    actionType:
+      operation.operationType === GraphQLOperationType.Query
+        ? 'query'
+        : 'mutation',
+    action,
+    types: sdlWithoutTypeQuery ?? '',
+    description: operation?.operation?.description ?? '',
+    method: parseRequestMethod(operation?.method),
+    baseUrl: graphqlSchema.data?.oass?.[0]?.servers?.[0]?.url ?? '',
+    // replace the regex /\{([^}]+)\}/g occurrences with {{$body.input.$1}} with the first letter lowercased
+    // e.g. /user/{UserId} -> /user/{{$body.input.userId}}
+    path: operation.path.replace(
+      /\{([^}]+)\}/g,
+      (_, p1) => `{{$body.input.${p1[0].toLowerCase()}${p1.slice(1)}}}`,
+    ),
+    requestTransforms: createRequestTransform(operation) ?? undefined,
+    responseTransforms: createResponseTransform(operation) ?? '',
+    sampleInput: JSON.stringify(sampleInput, null, 2),
+    headers,
+    queryParams,
+  };
+};
+
+const applyWorkarounds = (properties: (SchemaObject | ReferenceObject)[]) => {
+  for (const property of Object.values(properties ?? {})) {
+    if (!('$ref' in property)) {
+      delete property.default;
+      // fix boolean enum issue
+      if (property.type === 'boolean') {
+        delete property.enum;
+      }
+      // fix null enum issue
+      if (property.type === 'string' && property.enum) {
+        property.enum = property.enum?.filter((v) => v !== null);
+      }
+      // fix boolean enum issue
+      if (
+        property.type === 'string' &&
+        (property.enum || []).some((v) => v === 'true' || v === 'false')
+      ) {
+        delete property.enum;
+      }
+      // fix empty type issue
+      if (
+        property.type === 'object' &&
+        JSON.stringify(property.properties) === '{}'
+      ) {
+        property.type = 'string';
+        delete property.properties;
+      }
+      // fix array with no items issue
+      if (property.type === 'array' && !('items' in property)) {
+        property.items = { type: 'string' };
+      }
+      if (property.properties) {
+        applyWorkarounds(Object.values(property.properties));
+      }
+    }
+  }
+};
+
+export const parseOas = async (oas: Oas2 | Oas3): Promise<Result> => {
+  const oasCopy = JSON.parse(JSON.stringify(oas)) as Oas3;
+  if (oasCopy.components?.schemas) {
+    applyWorkarounds(Object.values(oasCopy.components?.schemas));
+    Object.values(oasCopy?.paths ?? {}).forEach((path) => {
+      path.get?.parameters?.forEach((param) => {
+        if ('schema' in param && param.schema) {
+          applyWorkarounds([param.schema]);
+        }
+      });
+    });
+  }
+
+  return createGraphQLSchema(oasCopy, {
+    fillEmptyResponses: true,
+    operationIdFieldNames: true,
+    simpleEnumValues: true,
+    viewer: false,
+    oasValidatorOptions: {
+      warnOnly: true,
+    },
+    softValidation: true,
+    report: {
+      validationErrors: [],
+      warnings: [],
+      numOps: 0,
+      numOpsQuery: 0,
+      numOpsMutation: 0,
+      numOpsSubscription: 0,
+      numQueriesCreated: 0,
+      numMutationsCreated: 0,
+      numSubscriptionsCreated: 0,
+    },
+  });
+};
+
+export const generateAction = async (
+  oas: Oas2 | Oas3,
+  operationId: string,
+): Promise<GeneratedAction> => {
+  const graphqlSchema = await parseOas(oas);
+  const operation = graphqlSchema.data.operations[operationId];
+  return translateAction(graphqlSchema, operation);
+};
+
+const generateRequestTransformBody = (
+  requestTransform: GeneratedAction['requestTransforms'],
+): RequestTransformBody | undefined => {
+  if (requestTransform?.type === 'json') {
+    return {
+      action: 'transform',
+      template: requestTransform.value,
+    };
+  }
+
+  if (requestTransform?.type === 'x-www-form-urlencoded') {
+    return {
+      action: 'x_www_form_urlencoded',
+      form_template: requestTransform.value,
+    };
+  }
+
+  return undefined;
+};
+
+export const generatedActionToHasuraAction = (
+  generatedAction: GeneratedAction,
+): {
+  state: ActionState;
+  requestTransform: ActionRequestTransform;
+  responseTransform: ResponseTransform | null;
+} => {
+  const state: ActionState = {
+    handler: generatedAction.baseUrl,
+    actionDefinition: {
+      sdl: generatedAction.action,
+    },
+    typeDefinition: {
+      sdl: generatedAction.types,
+    },
+    headers: generatedAction.headers.map((name) => ({
+      name,
+      value: `{{$body.input?.${name}}}`,
+      type: 'value',
+    })),
+    forwardClientHeaders: true,
+    kind: 'synchronous',
+    timeout: '',
+    comment: generatedAction.description,
+  };
+
+  const requestTransform: ActionRequestTransform = {
+    version: 2,
+    template_engine: 'Kriti',
+    method: generatedAction.method,
+    url: `{{$base_url}}${generatedAction.path}`,
+    query_params:
+      typeof generatedAction.queryParams === 'string'
+        ? generatedAction.queryParams
+        : generatedAction.queryParams.reduce(
+            (acc, curr) => ({
+              ...acc,
+              [curr.name]: curr.value,
+            }),
+
+            {} as Record<string, string>,
+          ),
+
+    ...(generatedAction.requestTransforms
+      ? {
+          body: generateRequestTransformBody(generatedAction.requestTransforms),
+        }
+      : {}),
+  };
+
+  const responseTransform: ResponseTransform | null =
+    generatedAction.responseTransforms
+      ? {
+          version: 2,
+          body: {
+            action: 'transform',
+            template: generatedAction.responseTransforms,
+          },
+          template_engine: 'Kriti',
+        }
+      : null;
+
+  return {
+    state,
+    requestTransform,
+    responseTransform,
+  };
+};
+
+export const isOasError = (error: Error): error is OASError =>
+  'options' in error;

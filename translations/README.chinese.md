@@ -16,7 +16,7 @@ Hasura可帮助您构建基于Postgres的GraphQL应用程序，或将使用Postg
 
 ------------------
 
-![Hasura GraphQL 引擎演示](../assets/demo.gif)
+![Hasura GraphQL 引擎演示](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/demo.gif)
 
 ------------------
 
@@ -83,12 +83,12 @@ Hasura可帮助您构建基于Postgres的GraphQL应用程序，或将使用Postg
 
 | **基础设施提供商** | **一键式链接** | **附加信息** |
 |:------------------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|:-------------------------------------------------------------------------------------------------------------------------------------------------:|
-| DigitalOcean | [![部署到 DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [文档](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
-| Azure | [![部署到 Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [文档](https://hasura.io/docs/1.0/graphql/manual/guides/deployment/azure-container-instances-postgres.html) |
+| DigitalOcean | [![部署到 DigitalOcean](https://graphql-engine-cdn.hasura.io/img/create_hasura_droplet_200px.png)](https://marketplace.digitalocean.com/apps/hasura?action=deploy&refcode=c4d9092d2c48&utm_source=hasura&utm_campaign=readme) | [文档](https://hasura.io/docs/latest/graphql/core/guides/deployment/digital-ocean-one-click.html#hasura-graphql-engine-digitalocean-one-click-app) |
+| Azure | [![部署到 Azure](http://azuredeploy.net/deploybutton.png)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3a%2f%2fraw.githubusercontent.com%2fhasura%2fgraphql-engine%2fmaster%2finstall-manifests%2fazure-container-with-pg%2fazuredeploy.json) | [文档](https://hasura.io/docs/latest/graphql/core/guides/deployment/azure-container-instances-postgres.html) |
 
 ### 其它部署方法
 
-关于基于Docker的部署和其它高级配置选项，请参阅[部署指南](https://hasura.io/docs/1.0/graphql/manual/getting-started/index.html) 或者
+关于基于Docker的部署和其它高级配置选项，请参阅[部署指南](https://hasura.io/docs/latest/graphql/core/getting-started/index.html) 或者
 [安装清单](../install-manifests).
 
 ## 架构
@@ -119,28 +119,28 @@ GraphQL Engine提供了易用，可伸缩，高性能的往后端插入自定义
 
 ### 派生数据或数据处理
 
-在Postgres中处理数据或对其做业务逻辑处理来导出另一套可以用GraphQL Engine处理的数据集 - [阅读更多](https://hasura.io/docs/1.0/graphql/manual/queries/derived-data.html).
+在Postgres中处理数据或对其做业务逻辑处理来导出另一套可以用GraphQL Engine处理的数据集 - [阅读更多](https://hasura.io/docs/latest/graphql/core/queries/derived-data.html).
 
 ## 演示
 
-访问[community/sample-apps](../community/sample-apps) 目录查看所有的演示
+访问[hasura/sample-apps](https://github.com/hasura/sample-apps/tree/main) 目录查看所有的演示
 
 ### 实时应用
 
 - 使用React构建的群聊应用程序，包括正在输入指示器，在线用户和新消息通知
-  - [试试看](https://realtime-chat.demo.hasura.app/)
-  - [讲解](../community/sample-apps/realtime-chat)
-  - [浏览API](https://realtime-chat.demo.hasura.app/console)
+  - [试试看](https://realtime-chat.demo.hasura.io/)
+  - [讲解](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [浏览API](https://realtime-chat.demo.hasura.io/console)
 
 - 实时位置跟踪应用程序，显示行驶中的车辆正在更改当前GPS坐标在地图上移动
-  - [试试看](https://realtime-location-tracking.demo.hasura.app/)
-  - [讲解](../community/sample-apps/realtime-location-tracking)
-  - [浏览API](https://realtime-location-tracking.demo.hasura.app/console)
+  - [试试看](https://realtime-location-tracking.demo.hasura.io/)
+  - [讲解](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [浏览API](https://realtime-location-tracking.demo.hasura.io/console)
 
 - 实时仪表板，用于聚合不断变化的数据
-  - [试试看](https://realtime-poll.demo.hasura.app/)
-  - [讲解](../community/sample-apps/realtime-poll)
-  - [浏览API](https://realtime-poll.demo.hasura.app/console)
+  - [试试看](https://realtime-poll.demo.hasura.io/)
+  - [讲解](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [浏览API](https://realtime-poll.demo.hasura.io/console)
 
 ### 视频
 
@@ -171,19 +171,19 @@ GraphQL Engine提供了易用，可伸缩，高性能的往后端插入自定义
 你可以在[assets/brand](../assets/brand)文件夹中找到Hasura的品牌资产（logo，Hasura吉祥物，powered-by badges等）。请随意在你的应用程序/网站等地方使用它们吧！我们将非常高兴看到在你用Hasura构建的应用里看到"Powered by Hasura"徽章。❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- For light backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- For dark backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

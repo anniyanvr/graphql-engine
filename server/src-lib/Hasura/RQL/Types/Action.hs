@@ -1,310 +1,462 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 module Hasura.RQL.Types.Action
-  ( ArgumentName(..)
-  , ArgumentDefinition(..)
+  ( -- * Metadata
+    ActionMetadata (..),
+    amName,
+    amComment,
+    amDefinition,
+    amPermissions,
+    ActionPermissionMetadata (..),
+    ActionName (..),
+    ActionId (..),
+    actionIdToText,
+    ActionDefinitionInput,
 
-  , ActionName(..)
-  , ActionMutationKind(..)
-  , _ActionAsynchronous
-  , ActionDefinition(..)
-  , adArguments
-  , adOutputType
-  , adType
-  , adForwardClientHeaders
-  , adHeaders
-  , adHandler
-  , adTimeout
-  , ActionType(..)
-  , _ActionMutation
-  , CreateAction(..)
-  , UpdateAction(..)
-  , ActionDefinitionInput
-  , InputWebhook(..)
+    -- ** Definition
+    ActionDefinition (..),
+    adArguments,
+    adOutputType,
+    adType,
+    adForwardClientHeaders,
+    adIgnoredClientHeaders,
+    adHeaders,
+    adHandler,
+    adTimeout,
+    adRequestTransform,
+    adResponseTransform,
+    ActionType (..),
+    ActionMutationKind (..),
 
-  , ResolvedWebhook(..)
-  , ResolvedActionDefinition
+    -- ** Arguments
+    ArgumentDefinition (..),
+    ArgumentName (..),
 
-  , ActionOutputFields
-  , getActionOutputFields
-  , ActionInfo(..)
-  , aiName
-  , aiOutputObject
-  , aiDefinition
-  , aiPermissions
-  , aiComment
-  , defaultActionTimeoutSecs
-  , ActionPermissionInfo(..)
+    -- * Schema cache
+    ActionInfo (..),
+    aiName,
+    aiComment,
+    aiDefinition,
+    aiOutputType,
+    aiPermissions,
+    aiForwardedClientHeaders,
+    aiIgnoredClientHeaders,
+    ActionPermissionInfo (..),
+    ResolvedActionDefinition,
 
-  , ActionPermissionMap
-  , CreateActionPermission(..)
+    -- * Execution types
+    ActionExecContext (..),
+    ActionLogResponse (..),
+    ActionLogResponseMap,
+    ActionLogItem (..),
+    LockedActionEventId,
+    LockedActionIdArray (..),
+    AsyncActionStatus (..),
+    ActionsInfo (..),
+  )
+where
 
-  , ActionMetadata(..)
-  , ActionPermissionMetadata(..)
+import Autodocodec (HasCodec, dimapCodec, disjointEitherCodec, optionalField', optionalFieldWith', optionalFieldWithDefault', optionalFieldWithOmittedDefault', requiredField')
+import Autodocodec qualified as AC
+import Autodocodec.Extended (boundedEnumCodec, discriminatorField, graphQLFieldDescriptionCodec, graphQLFieldNameCodec, typeableName)
+import Control.Lens (makeLenses)
+import Data.Aeson qualified as J
+import Data.Aeson.Casing qualified as J
+import Data.Aeson.Extended
+import Data.Text.Extended
+import Data.Time.Clock qualified as UTC
+import Data.Typeable (Typeable)
+import Data.UUID qualified as UUID
+import Database.PG.Query qualified as PG
+import Database.PG.Query.PTI qualified as PTI
+import Hasura.Authentication.Headers (commonClientHeadersIgnored)
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Authentication.Session (SessionVariables)
+import Hasura.Base.Error
+import Hasura.Prelude
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.CustomTypes
+import Hasura.RQL.Types.Eventing (EventId (..))
+import Hasura.RQL.Types.Headers
+import Hasura.RQL.Types.Webhook.Transform (MetadataResponseTransform, RequestTransform)
+import Language.GraphQL.Draft.Syntax qualified as G
+import Network.HTTP.Types qualified as HTTP
+import PostgreSQL.Binary.Encoding qualified as PE
 
-  , AnnActionExecution(..)
-  , AnnActionMutationAsync(..)
-  , ActionExecContext(..)
-  , AsyncActionQueryFieldG(..)
-  , AnnActionAsyncQuery(..)
-  ) where
+--------------------------------------------------------------------------------
+-- Metadata
 
+data ActionMetadata = ActionMetadata
+  { _amName :: ActionName,
+    _amComment :: Maybe Text,
+    _amDefinition :: ActionDefinitionInput,
+    _amPermissions :: [ActionPermissionMetadata]
+  }
+  deriving (Show, Eq, Generic)
 
-import           Hasura.Prelude
+instance NFData ActionMetadata
 
-import qualified Data.Aeson                    as J
-import qualified Data.Aeson.Casing             as J
-import qualified Data.Aeson.TH                 as J
-import qualified Data.HashMap.Strict           as Map
-import qualified Database.PG.Query             as Q
-import qualified Language.GraphQL.Draft.Syntax as G
-import qualified Network.HTTP.Client           as HTTP
-import qualified Network.HTTP.Types            as HTTP
+instance HasCodec ActionMetadata where
+  codec =
+    AC.object "ActionMetadata"
+      $ ActionMetadata
+      <$> requiredField' "name"
+      AC..= _amName
+        <*> optionalField' "comment"
+      AC..= _amComment
+        <*> requiredField' "definition"
+      AC..= _amDefinition
+        <*> optionalFieldWithOmittedDefault' "permissions" []
+      AC..= _amPermissions
 
-import           Control.Lens                  (makeLenses, makePrisms)
-import           Data.Text.Extended
+data ActionPermissionMetadata = ActionPermissionMetadata
+  { _apmRole :: RoleName,
+    _apmComment :: Maybe Text
+  }
+  deriving (Show, Eq, Generic)
 
-import           Hasura.Incremental            (Cacheable)
-import           Hasura.RQL.DDL.Headers
-import           Hasura.RQL.IR.Select
-import           Hasura.RQL.Types.Common
-import           Hasura.RQL.Types.CustomTypes
-import           Hasura.Session
-import           Hasura.SQL.Backend
+instance NFData ActionPermissionMetadata
 
+instance HasCodec ActionPermissionMetadata where
+  codec =
+    AC.object "ActionPermissionMetadata"
+      $ ActionPermissionMetadata
+      <$> requiredField' "role"
+      AC..= _apmRole
+        <*> optionalField' "comment"
+      AC..= _apmComment
 
-newtype ActionName
-  = ActionName { unActionName :: G.Name }
-  deriving ( Show, Eq, J.FromJSON, J.ToJSON, J.FromJSONKey, J.ToJSONKey
-           , Hashable, ToTxt, Generic, NFData, Cacheable)
+newtype ActionName = ActionName {unActionName :: G.Name}
+  deriving (Show, Eq, Ord, J.FromJSON, J.ToJSON, J.FromJSONKey, J.ToJSONKey, ToTxt, Generic, NFData, Hashable)
 
-instance Q.FromCol ActionName where
+instance HasCodec ActionName where
+  codec = dimapCodec ActionName unActionName graphQLFieldNameCodec
+
+newtype ActionId = ActionId {unActionId :: UUID.UUID}
+  deriving (Show, Eq, PG.ToPrepArg, PG.FromCol, J.ToJSON, J.FromJSON, Hashable)
+
+actionIdToText :: ActionId -> Text
+actionIdToText = UUID.toText . unActionId
+
+-- Required in the context of event triggers?
+-- TODO: document this / get rid of it
+instance PG.FromCol ActionName where
   fromCol bs = do
-    text <- Q.fromCol bs
+    text <- PG.fromCol bs
     name <- G.mkName text `onNothing` Left (text <> " is not valid GraphQL name")
     pure $ ActionName name
 
-instance Q.ToPrepArg ActionName where
-  toPrepVal = Q.toPrepVal . G.unName . unActionName
+-- For legacy catalog format.
+instance PG.ToPrepArg ActionName where
+  toPrepVal = PG.toPrepVal . G.unName . unActionName
+
+type ActionDefinitionInput =
+  ActionDefinition GraphQLType InputWebhook
+
+--------------------------------------------------------------------------------
+-- Definition
+
+data ActionDefinition arg webhook = ActionDefinition
+  { _adArguments :: [ArgumentDefinition arg],
+    _adOutputType :: GraphQLType,
+    _adType :: ActionType,
+    _adHeaders :: [HeaderConf],
+    _adForwardClientHeaders :: Bool,
+    _adIgnoredClientHeaders :: [Text],
+    -- | If the timeout is not provided by the user, then
+    -- the default timeout of 30 seconds will be used
+    _adTimeout :: Timeout,
+    _adHandler :: webhook,
+    _adRequestTransform :: Maybe RequestTransform,
+    _adResponseTransform :: Maybe MetadataResponseTransform
+  }
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+
+instance (NFData a, NFData w) => NFData (ActionDefinition a w)
+
+instance
+  (Eq arg, HasCodec (ArgumentDefinition arg), HasCodec webhook, Typeable arg, Typeable webhook) =>
+  HasCodec (ActionDefinition arg webhook)
+  where
+  codec =
+    dimapCodec dec enc
+      $ disjointEitherCodec (actionCodec (const ActionQuery)) (actionCodec ActionMutation)
+    where
+      actionCodec :: (ActionMutationKind -> ActionType) -> AC.JSONCodec (ActionDefinition arg webhook)
+      actionCodec actionTypeConstructor =
+        AC.object (typeId actionTypeConstructor)
+          $ ActionDefinition
+          <$> optionalFieldWithOmittedDefault' "arguments" []
+          AC..= _adArguments
+            <*> requiredField' "output_type"
+          AC..= _adOutputType
+            <*> typeAndKind actionTypeConstructor
+          AC..= _adType
+            <*> optionalFieldWithOmittedDefault' "headers" []
+          AC..= _adHeaders
+            <*> optionalFieldWithOmittedDefault' "forward_client_headers" False
+          AC..= _adForwardClientHeaders
+            <*> optionalFieldWithOmittedDefault' "ignored_client_headers" commonClientHeadersIgnored
+          AC..= _adIgnoredClientHeaders
+            <*> optionalFieldWithOmittedDefault' "timeout" defaultActionTimeoutSecs
+          AC..= _adTimeout
+            <*> requiredField' "handler"
+          AC..= _adHandler
+            <*> optionalField' "request_transform"
+          AC..= _adRequestTransform
+            <*> optionalField' "response_transform"
+          AC..= _adResponseTransform
+
+      typeAndKind :: (ActionMutationKind -> ActionType) -> AC.ObjectCodec ActionType ActionType
+      typeAndKind actionTypeConstructor = case (actionTypeConstructor ActionSynchronous) of
+        (ActionMutation _) ->
+          ActionMutation
+            <$ discriminatorField "type" "mutation"
+            <*> optionalFieldWithDefault' "kind" ActionSynchronous
+            AC..= \case
+              (ActionMutation kind) -> kind
+              ActionQuery -> ActionSynchronous
+        ActionQuery -> ActionQuery <$ discriminatorField "type" "query"
+
+      dec (Left a) = a
+      dec (Right a) = a
+      enc a
+        | _adType a == ActionQuery = Left a
+        | otherwise = Right a
+
+      typeId actionTypeConstructor =
+        let typeLabel = case (actionTypeConstructor ActionSynchronous) of
+              (ActionMutation _) -> "Mutation"
+              ActionQuery -> "Query"
+         in "ActionDefinition_" <> typeLabel <> "_" <> typeableName @arg <> "_" <> typeableName @webhook
+
+data ActionType
+  = ActionQuery
+  | ActionMutation ActionMutationKind
+  deriving (Show, Eq, Generic)
+
+instance NFData ActionType
+
+instance ToJSON ActionType where
+  toJSON = \case
+    ActionQuery -> "query"
+    ActionMutation kind -> J.toJSON $ "mutation-" <> jsonStringConst kind
 
 data ActionMutationKind
   = ActionSynchronous
   | ActionAsynchronous
-  deriving (Show, Eq, Generic)
+  deriving (Show, Bounded, Enum, Eq, Generic)
+
 instance NFData ActionMutationKind
-instance Cacheable ActionMutationKind
-$(J.deriveJSON
-  J.defaultOptions { J.constructorTagModifier = J.snakeCase . drop 6}
-  ''ActionMutationKind)
-$(makePrisms ''ActionMutationKind)
 
-newtype ArgumentName
-  = ArgumentName { unArgumentName :: G.Name }
-  deriving ( Show, Eq, J.FromJSON, J.ToJSON, J.FromJSONKey, J.ToJSONKey
-           , Hashable, ToTxt, Generic, NFData, Cacheable)
+instance HasCodec ActionMutationKind where
+  codec = boundedEnumCodec jsonStringConst
 
-data ArgumentDefinition a
-  = ArgumentDefinition
-  { _argName        :: !ArgumentName
-  , _argType        :: !a
-  , _argDescription :: !(Maybe G.Description)
-  } deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+-- | Defines representation of 'ActionMutationKind' when serializing to JSON.
+jsonStringConst :: ActionMutationKind -> String
+jsonStringConst = \case
+  ActionSynchronous -> "synchronous"
+  ActionAsynchronous -> "asynchronous"
+
+--------------------------------------------------------------------------------
+-- Arguments
+
+data ArgumentDefinition a = ArgumentDefinition
+  { _argName :: ArgumentName,
+    _argType :: a,
+    _argDescription :: Maybe G.Description
+  }
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+
 instance (NFData a) => NFData (ArgumentDefinition a)
-instance (Cacheable a) => Cacheable (ArgumentDefinition a)
-$(J.deriveJSON (J.aesonDrop 4 J.snakeCase) ''ArgumentDefinition)
 
-data ActionType
-  = ActionQuery
-  | ActionMutation !ActionMutationKind
+instance (HasCodec a, Typeable a) => HasCodec (ArgumentDefinition a) where
+  codec =
+    AC.object ("ArgumentDefinition_" <> typeableName @a)
+      $ ArgumentDefinition
+      <$> requiredField' "name"
+      AC..= _argName
+        <*> requiredField' "type"
+      AC..= _argType
+        <*> optionalFieldWith' "description" graphQLFieldDescriptionCodec
+      AC..= _argDescription
+
+newtype ArgumentName = ArgumentName {unArgumentName :: G.Name}
+  deriving (Show, Eq, J.FromJSON, J.ToJSON, J.FromJSONKey, J.ToJSONKey, ToTxt, Generic, NFData)
+
+instance HasCodec ArgumentName where
+  codec = dimapCodec ArgumentName unArgumentName graphQLFieldNameCodec
+
+--------------------------------------------------------------------------------
+-- Schema cache
+
+data ActionInfo = ActionInfo
+  { _aiName :: ActionName,
+    _aiOutputType :: (G.GType, AnnotatedOutputType),
+    _aiDefinition :: ResolvedActionDefinition,
+    _aiPermissions :: HashMap RoleName ActionPermissionInfo,
+    _aiForwardedClientHeaders :: Bool,
+    _aiIgnoredClientHeaders :: [Text],
+    _aiComment :: Maybe Text
+  }
+  deriving (Generic)
+
+type ResolvedActionDefinition =
+  ActionDefinition (G.GType, AnnotatedInputType) (EnvRecord ResolvedWebhook)
+
+newtype ActionPermissionInfo = ActionPermissionInfo
+  { _apiRole :: RoleName
+  }
+  deriving newtype (Show, Eq, FromJSON, ToJSON)
+
+--------------------------------------------------------------------------------
+-- Execution types
+
+-- TODO: those types are not used outside of the execution side of things, and
+-- should be moved out of RQL.Types to become implementation details of
+-- GraphQL.Execute.
+
+data ActionExecContext = ActionExecContext
+  { _aecHeaders :: HTTP.RequestHeaders,
+    _aecSessionVariables :: SessionVariables
+  }
+
+data ActionLogItem = ActionLogItem
+  { _aliId :: ActionId,
+    _aliActionName :: ActionName,
+    _aliRequestHeaders :: [HTTP.Header],
+    _aliSessionVariables :: SessionVariables,
+    _aliInputPayload :: J.Value
+  }
+  deriving (Show, Eq)
+
+data ActionLogResponse = ActionLogResponse
+  { _alrId :: ActionId,
+    _alrCreatedAt :: UTC.UTCTime,
+    _alrResponsePayload :: Maybe J.Value,
+    _alrErrors :: Maybe J.Value,
+    _alrSessionVariables :: SessionVariables
+  }
+  deriving stock (Show, Eq, Generic)
+
+type ActionLogResponseMap = HashMap ActionId ActionLogResponse
+
+data AsyncActionStatus
+  = AASCompleted J.Value
+  | AASError QErr
+
+data ActionsInfo = ActionsInfo
+  { _asiName :: ActionName,
+    _asiForwardClientHeaders :: Bool
+  }
   deriving (Show, Eq, Generic)
-instance NFData ActionType
-instance Cacheable ActionType
-$(makePrisms ''ActionType)
 
-data ActionDefinition a b
-  = ActionDefinition
-  { _adArguments            :: ![a]
-  , _adOutputType           :: !GraphQLType
-  , _adType                 :: !ActionType
-  , _adHeaders              :: ![HeaderConf]
-  , _adForwardClientHeaders :: !Bool
-  , _adTimeout              :: !Timeout
-  -- ^ If the timeout is not provided by the user, then
-  -- the default timeout of 30 seconds will be used
-  , _adHandler              :: !b
-  } deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
-instance (NFData a, NFData b) => NFData (ActionDefinition a b)
-instance (Cacheable a, Cacheable b) => Cacheable (ActionDefinition a b)
-$(makeLenses ''ActionDefinition)
+type LockedActionEventId = EventId
+
+-- This type exists only to use the Postgres array encoding.
+-- TODO: document this; what does that mean? Why is it defined here? What's the
+-- common point with EventTriggers?
+newtype LockedActionIdArray = LockedActionIdArray {unCohortIdArray :: [LockedActionEventId]}
+  deriving (Show, Eq)
+
+instance PG.ToPrepArg LockedActionIdArray where
+  toPrepVal (LockedActionIdArray l) =
+    PG.toPrepValHelper PTI.unknown encoder $ mapMaybe (UUID.fromText . unEventId) l
+    where
+      encoder = PE.array 2950 . PE.dimensionArray foldl' (PE.encodingArray . PE.uuid)
+
+-------------------------------------------------------------------------------
+-- Template haskell derivation
+-- ...and other instances that need to live here in a particular order, due to
+-- GHC 9.0 TH changes...
+
+instance FromJSON ActionPermissionMetadata where
+  parseJSON = genericParseJSON hasuraJSON {J.omitNothingFields = True}
+
+instance ToJSON ActionPermissionMetadata where
+  toJSON = genericToJSON hasuraJSON {J.omitNothingFields = True}
+  toEncoding = genericToEncoding hasuraJSON {J.omitNothingFields = True}
+
+instance (FromJSON arg) => FromJSON (ArgumentDefinition arg) where
+  parseJSON = genericParseJSON hasuraJSON
+
+instance (ToJSON arg) => ToJSON (ArgumentDefinition arg) where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
+
+instance FromJSON ActionMutationKind where
+  parseJSON = genericParseJSON hasuraJSON {J.constructorTagModifier = J.snakeCase . drop 6}
+
+instance ToJSON ActionMutationKind where
+  toJSON = genericToJSON hasuraJSON {J.constructorTagModifier = J.snakeCase . drop 6}
+  toEncoding = genericToEncoding hasuraJSON {J.constructorTagModifier = J.snakeCase . drop 6}
 
 instance (J.FromJSON a, J.FromJSON b) => J.FromJSON (ActionDefinition a b) where
   parseJSON = J.withObject "ActionDefinition" $ \o -> do
-    _adArguments <- o J..:? "arguments" J..!= []
-    _adOutputType <- o J..: "output_type"
-    _adHeaders <- o J..:? "headers" J..!= []
-    _adForwardClientHeaders <- o J..:? "forward_client_headers" J..!= False
-    _adHandler <- o J..:  "handler"
-    _adTimeout <- o J..:? "timeout" J..!= defaultActionTimeoutSecs
-    actionType <- o J..:? "type" J..!= "mutation"
+    _adArguments <- o .:? "arguments" .!= []
+    _adOutputType <- o .: "output_type"
+    _adHeaders <- o .:? "headers" .!= []
+    _adForwardClientHeaders <- o .:? "forward_client_headers" .!= False
+    _adIgnoredClientHeaders <- o .:? "ignored_client_headers" .!= commonClientHeadersIgnored
+    _adHandler <- o .: "handler"
+    _adTimeout <- o .:? "timeout" .!= defaultActionTimeoutSecs
+    actionType <- o .:? "type" .!= "mutation"
     _adType <- case actionType of
-      "mutation" -> ActionMutation <$> o J..:? "kind" J..!= ActionSynchronous
-      "query"    -> pure ActionQuery
-      t          -> fail $ "expected mutation or query, but found " <> t
-    return ActionDefinition {..}
-
-instance (J.ToJSON a, J.ToJSON b) => J.ToJSON (ActionDefinition a b) where
-  toJSON (ActionDefinition args outputType actionType headers forwardClientHeaders timeout handler) =
-    let typeAndKind = case actionType of
-          ActionQuery -> [ "type" J..= ("query" :: String)]
-          ActionMutation kind -> [ "type" J..= ("mutation" :: String)
-                                 , "kind" J..= kind]
-    in J.object $
-    [ "arguments"              J..= args
-    , "output_type"            J..= outputType
-    , "headers"                J..= headers
-    , "forward_client_headers" J..= forwardClientHeaders
-    , "handler"                J..= handler
-    , "timeout"                J..= timeout
-    ] <> typeAndKind
-
-type ResolvedActionDefinition =
-  ActionDefinition (ArgumentDefinition (G.GType, NonObjectCustomType)) ResolvedWebhook
-
-data ActionPermissionInfo
-  = ActionPermissionInfo
-  { _apiRole   :: !RoleName
-  } deriving (Show, Eq)
-$(J.deriveToJSON (J.aesonDrop 4 J.snakeCase) ''ActionPermissionInfo)
-
-type ActionPermissionMap = Map.HashMap RoleName ActionPermissionInfo
-
-type ActionOutputFields = Map.HashMap G.Name G.GType
-
-getActionOutputFields :: AnnotatedObjectType backend -> ActionOutputFields
-getActionOutputFields =
-  Map.fromList . map ( (unObjectFieldName . _ofdName) &&& (fst . _ofdType)) . toList . _otdFields
-
-data ActionInfo (b :: BackendType)
-  = ActionInfo
-  { _aiName         :: !ActionName
-  , _aiOutputObject :: !(AnnotatedObjectType b)
-  , _aiDefinition   :: !ResolvedActionDefinition
-  , _aiPermissions  :: !ActionPermissionMap
-  , _aiComment      :: !(Maybe Text)
-  } deriving (Generic)
-instance J.ToJSON (ActionInfo 'Postgres) where
-  toJSON = J.genericToJSON $ J.aesonDrop 3 J.snakeCase
-$(makeLenses ''ActionInfo)
-
-type ActionDefinitionInput =
-  ActionDefinition (ArgumentDefinition GraphQLType) InputWebhook
-
-data CreateAction
-  = CreateAction
-  { _caName       :: !ActionName
-  , _caDefinition :: !ActionDefinitionInput
-  , _caComment    :: !(Maybe Text)
-  } deriving (Show, Eq, Generic)
-instance NFData CreateAction
-instance Cacheable CreateAction
-$(J.deriveJSON (J.aesonDrop 3 J.snakeCase) ''CreateAction)
-
-data UpdateAction
-  = UpdateAction
-  { _uaName       :: !ActionName
-  , _uaDefinition :: !ActionDefinitionInput
-  } deriving (Show, Eq)
-$(J.deriveJSON (J.aesonDrop 3 J.snakeCase) ''UpdateAction)
-
-data CreateActionPermission
-  = CreateActionPermission
-  { _capAction     :: !ActionName
-  , _capRole       :: !RoleName
-  , _capDefinition :: !(Maybe J.Value)
-  , _capComment    :: !(Maybe Text)
-  } deriving (Show, Eq, Generic)
-instance NFData CreateActionPermission
-instance Cacheable CreateActionPermission
-$(J.deriveJSON (J.aesonDrop 4 J.snakeCase) ''CreateActionPermission)
-
--- representation of action permission metadata
-data ActionPermissionMetadata
-  = ActionPermissionMetadata
-  { _apmRole    :: !RoleName
-  , _apmComment :: !(Maybe Text)
-  } deriving (Show, Eq, Generic)
-instance NFData ActionPermissionMetadata
-instance Cacheable ActionPermissionMetadata
-
-$(J.deriveJSON
-  (J.aesonDrop 4 J.snakeCase){J.omitNothingFields=True}
-  ''ActionPermissionMetadata)
-
--- representation of action metadata
-data ActionMetadata
-  = ActionMetadata
-  { _amName        :: !ActionName
-  , _amComment     :: !(Maybe Text)
-  , _amDefinition  :: !ActionDefinitionInput
-  , _amPermissions :: ![ActionPermissionMetadata]
-  } deriving (Show, Eq, Generic)
-$(J.deriveToJSON (J.aesonDrop 3 J.snakeCase) ''ActionMetadata)
-instance NFData ActionMetadata
-instance Cacheable ActionMetadata
+      "mutation" -> ActionMutation <$> o .:? "kind" .!= ActionSynchronous
+      "query" -> pure ActionQuery
+      t -> fail $ "expected mutation or query, but found " <> t
+    _adRequestTransform <- o .:? "request_transform"
+    _adResponseTransform <- o .:? "response_transform"
+    pure ActionDefinition {..}
 
 instance J.FromJSON ActionMetadata where
-  parseJSON = J.withObject "Object" $ \o ->
+  parseJSON = J.withObject "ActionMetadata" $ \o ->
     ActionMetadata
-      <$> o J..: "name"
-      <*> o J..:? "comment"
-      <*> o J..: "definition"
-      <*> o J..:? "permissions" J..!= []
+      <$> o
+      .: "name"
+      <*> o
+      .:? "comment"
+      <*> o
+      .: "definition"
+      <*> o
+      .:? "permissions"
+      .!= []
 
------------------ Resolve Types ----------------
+instance (J.ToJSON a, J.ToJSON b) => J.ToJSON (ActionDefinition a b) where
+  toJSON (ActionDefinition {..}) =
+    let typeAndKind = case _adType of
+          ActionQuery -> ["type" .= ("query" :: String)]
+          ActionMutation kind ->
+            [ "type" .= ("mutation" :: String),
+              "kind" .= kind
+            ]
+     in J.object
+          $ [ "arguments" .= _adArguments,
+              "output_type" .= _adOutputType,
+              "headers" .= _adHeaders,
+              "forward_client_headers" .= _adForwardClientHeaders,
+              "handler" .= _adHandler,
+              "timeout" .= _adTimeout
+            ]
+          <> catMaybes
+            [ ("request_transform" .=) <$> _adRequestTransform,
+              ("response_transform" .=) <$> _adResponseTransform
+            ]
+          <> typeAndKind
 
-data AnnActionExecution (b :: BackendType) v
-  = AnnActionExecution
-  { _aaeName                 :: !ActionName
-  , _aaeOutputType           :: !GraphQLType -- ^ output type
-  , _aaeFields               :: !(AnnFieldsG b v) -- ^ output selection
-  , _aaePayload              :: !J.Value -- ^ jsonified input arguments
-  , _aaeOutputFields         :: !ActionOutputFields
-  -- ^ to validate the response fields from webhook
-  , _aaeDefinitionList       :: ![(Column b, ScalarType b)]
-  , _aaeWebhook              :: !ResolvedWebhook
-  , _aaeHeaders              :: ![HeaderConf]
-  , _aaeForwardClientHeaders :: !Bool
-  , _aaeStrfyNum             :: !Bool
-  , _aaeTimeOut              :: !Timeout
-  }
+instance ToJSON ActionLogResponse where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
 
-data AnnActionMutationAsync
-  = AnnActionMutationAsync
-  { _aamaName    :: !ActionName
-  , _aamaPayload :: !J.Value -- ^ jsonified input arguments
-  } deriving (Show, Eq)
+instance ToJSON ActionMetadata where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
 
-data AsyncActionQueryFieldG (b :: BackendType) v
-  = AsyncTypename !Text
-  | AsyncOutput !(AnnFieldsG b v)
-  | AsyncId
-  | AsyncCreatedAt
-  | AsyncErrors
+instance ToJSON ActionInfo where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
 
-type AsyncActionQueryFieldsG b v = Fields (AsyncActionQueryFieldG b v)
-
-data AnnActionAsyncQuery (b :: BackendType) v
-  = AnnActionAsyncQuery
-  { _aaaqName           :: !ActionName
-  , _aaaqActionId       :: !v
-  , _aaaqOutputType     :: !GraphQLType
-  , _aaaqFields         :: !(AsyncActionQueryFieldsG b v)
-  , _aaaqDefinitionList :: ![(Column b, ScalarType b)]
-  , _aaaqStringifyNum   :: !Bool
-  }
-
-data ActionExecContext
-  = ActionExecContext
-  { _aecManager          :: !HTTP.Manager
-  , _aecHeaders          :: !HTTP.RequestHeaders
-  , _aecSessionVariables :: !SessionVariables
-  }
+$(makeLenses ''ActionMetadata)
+$(makeLenses ''ActionDefinition)
+$(makeLenses ''ActionInfo)

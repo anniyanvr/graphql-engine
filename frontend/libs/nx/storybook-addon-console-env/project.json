@@ -1,0 +1,72 @@
+{
+  "name": "nx-storybook-addon-console-env",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/nx/storybook-addon-console-env/src",
+  "projectType": "library",
+  "tags": ["scope:shared", "type:feature", "meta:package"],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:swc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/libs/nx/storybook-addon-console-env",
+        "main": "libs/nx/storybook-addon-console-env/src/lib/index.ts",
+        "tsConfig": "libs/nx/storybook-addon-console-env/tsconfig.lib.json",
+        "assets": [
+          "libs/nx/storybook-addon-console-env/*.md",
+          {
+            "glob": "**/*",
+            "input": "libs/nx/storybook-addon-console-env/prod/",
+            "output": ""
+          }
+        ]
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": [
+          "libs/nx/storybook-addon-console-env/**/*.{ts,tsx,js,jsx,json}"
+        ]
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "coverage/libs/nx/storybook-addon-console-env"
+      }
+    },
+    "build-storybook": {
+      "dependsOn": ["build"],
+      "outputs": ["{projectRoot}/{options.output-dir}"],
+      "options": {
+        "output-dir": "../../../dist/storybook/nx/storybook-addon-console-env"
+      }
+    },
+    "storybook": {
+      "dependsOn": ["build"],
+      "options": {
+        "port": 4400,
+        "config-dir": ".storybook"
+      },
+      "configurations": {
+        "ci": {
+          "args": ["--quiet"]
+        }
+      }
+    },
+    "publish": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        {
+          "target": "build"
+        }
+      ],
+      "options": {
+        "command": "node tools/scripts/publish.mjs nx-storybook-addon-console-env {args.ver} {args.tag}"
+      }
+    }
+  }
+}

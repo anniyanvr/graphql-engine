@@ -30,39 +30,39 @@ const handlePayload = (payload) => {
           a.name,
           a.definition.type,
           a.definition.arguments,
-          a.definition.output_type,
-        )}\n`;
+          a.definition.output_type
+        )}`;
       });
     } catch (e) {
       actionSdlError = e;
     }
   }
 
+  let sdl = `${actionSdl}`;
   if (types) {
     try {
       typesSdl = getTypesSdl(types);
+      sdl = `${sdl}${typesSdl}`;
     } catch (e) {
       typesSdlError = e;
     }
   }
-
-  let sdl = `${actionSdl}\n\n${typesSdl}`;
 
   if (toDeriveOperation) {
     try {
       const derivation = deriveAction(
         toDeriveOperation,
         introspectionSchema,
-        actionName,
+        actionName
       );
       const derivedActionSdl = getActionDefinitionSdl(
         derivation.action.name,
         derivation.action.type,
         derivation.action.arguments,
-        derivation.action.output_type,
+        derivation.action.output_type
       );
       const derivedTypesSdl = getTypesSdl(derivation.types);
-      sdl = `${derivedActionSdl}\n\n${derivedTypesSdl}\n\n${sdl}`;
+      sdl = `${derivedActionSdl}${derivedTypesSdl}${sdl}`;
     } catch (e) {
       deriveActionError = e;
     }

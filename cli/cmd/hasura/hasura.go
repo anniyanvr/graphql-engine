@@ -2,11 +2,11 @@
 package main
 
 import (
-	"github.com/hasura/graphql-engine/cli/commands"
+	"github.com/hasura/graphql-engine/cli/v2/commands"
 	log "github.com/sirupsen/logrus"
 )
 
-// main is the entrypoint function
+// main is the entrypoint function.
 func main() {
 	err := commands.Execute()
 	if err != nil {

@@ -1,74 +1,130 @@
+{-# LANGUAGE DeriveAnyClass #-}
+
 -- | API related to server configuration
 module Hasura.Server.API.Config
-  -- required by pro
-  ( ServerConfig(..)
-  , runGetConfig
-  ) where
+-- required by pro
+  ( ServerConfig (..),
+    runGetConfig,
+  )
+where
 
-import           Data.Aeson.Casing
-import           Data.Aeson.TH
+import Data.Aeson qualified as J
+import Data.HashSet qualified as Set
+import Hasura.GraphQL.Execute.Subscription.Options qualified as ES
+import Hasura.Prelude
+import Hasura.RQL.Types.NamingCase
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.Server.Auth
+import Hasura.Server.Auth.JWT
+import Hasura.Server.Init.Config (API (METRICS), AllowListStatus)
+import Hasura.Server.Types (ApolloFederationStatus, ExperimentalFeature)
+import Hasura.Server.Version (Version, currentVersion)
 
-import           Hasura.Prelude
-import           Hasura.Server.Auth
-import           Hasura.Server.Auth.JWT
-import           Hasura.Server.Version                    (HasVersion, Version, currentVersion)
+data JWTInfo = JWTInfo
+  { jwtiClaimsNamespace :: !JWTNamespace,
+    jwtiClaimsFormat :: !JWTClaimsFormat,
+    jwtiClaimsMap :: !(Maybe JWTCustomClaimsMap)
+  }
+  deriving (Show, Eq, Generic)
 
-import qualified Hasura.GraphQL.Execute.LiveQuery.Options as LQ
+instance J.ToJSON JWTInfo where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
-data JWTInfo
-  = JWTInfo
-  { jwtiClaimsNamespace :: !JWTNamespace
-  , jwtiClaimsFormat    :: !JWTClaimsFormat
-  , jwtiClaimsMap       :: !(Maybe JWTCustomClaimsMap)
-  } deriving (Show, Eq)
+data ServerConfig = ServerConfig
+  { scfgVersion :: !Version,
+    scfgIsFunctionPermissionsInferred :: !Options.InferFunctionPermissions,
+    scfgIsRemoteSchemaPermissionsEnabled :: !Options.RemoteSchemaPermissions,
+    scfgIsAdminSecretSet :: !Bool,
+    scfgIsAuthHookSet :: !Bool,
+    scfgIsJwtSet :: !Bool,
+    scfgJwt :: ![JWTInfo],
+    scfgIsAllowListEnabled :: !AllowListStatus,
+    scfgLiveQueries :: !ES.LiveQueriesOptions,
+    scfgStreamingQueries :: !ES.SubscriptionsOptions,
+    scfgConsoleAssetsDir :: !(Maybe Text),
+    scfgExperimentalFeatures :: !(Set.HashSet ExperimentalFeature),
+    scfgIsPrometheusMetricsEnabled :: !Bool,
+    scfgDefaultNamingConvention :: !NamingCase,
+    scfgIsApolloFederationEnabled :: !ApolloFederationStatus
+  }
+  deriving (Show, Eq, Generic)
 
-$(deriveToJSON (aesonDrop 4 snakeCase) ''JWTInfo)
+instance J.ToJSON ServerConfig where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
-data ServerConfig
-  = ServerConfig
-  { scfgVersion            :: !Version
-  , scfgIsAdminSecretSet   :: !Bool
-  , scfgIsAuthHookSet      :: !Bool
-  , scfgIsJwtSet           :: !Bool
-  , scfgJwt                :: !(Maybe JWTInfo)
-  , scfgIsAllowListEnabled :: !Bool
-  , scfgLiveQueries        :: !LQ.LiveQueriesOptions
-  , scfgConsoleAssetsDir   :: !(Maybe Text)
-  } deriving (Show, Eq)
-
-$(deriveToJSON (aesonDrop 4 snakeCase) ''ServerConfig)
-
-runGetConfig :: HasVersion => AuthMode -> Bool -> LQ.LiveQueriesOptions -> Maybe Text -> ServerConfig
-runGetConfig am isAllowListEnabled liveQueryOpts consoleAssetsDir = ServerConfig
-    currentVersion
-    (isAdminSecretSet am)
-    (isAuthHookSet am)
-    (isJWTSet am)
-    (getJWTInfo am)
-    isAllowListEnabled
-    liveQueryOpts
-    consoleAssetsDir
+runGetConfig ::
+  Options.InferFunctionPermissions ->
+  Options.RemoteSchemaPermissions ->
+  AuthMode ->
+  AllowListStatus ->
+  ES.LiveQueriesOptions ->
+  ES.SubscriptionsOptions ->
+  Maybe Text ->
+  Set.HashSet ExperimentalFeature ->
+  Set.HashSet API ->
+  NamingCase ->
+  ApolloFederationStatus ->
+  ServerConfig
+runGetConfig
+  functionPermsCtx
+  remoteSchemaPermsCtx
+  am
+  allowListStatus
+  liveQueryOpts
+  streamQueryOpts
+  consoleAssetsDir
+  experimentalFeatures
+  enabledAPIs
+  defaultNamingConvention
+  apolloFederationStatus =
+    ServerConfig
+      currentVersion
+      functionPermsCtx
+      remoteSchemaPermsCtx
+      (isAdminSecretSet am)
+      (isAuthHookSet am)
+      (isJWTSet am)
+      (getJWTInfo am)
+      allowListStatus
+      liveQueryOpts
+      streamQueryOpts
+      consoleAssetsDir
+      experimentalFeatures
+      isPrometheusMetricsEnabled
+      defaultNamingConvention
+      apolloFederationStatus
+    where
+      isPrometheusMetricsEnabled = METRICS `Set.member` enabledAPIs
 
 isAdminSecretSet :: AuthMode -> Bool
 isAdminSecretSet = \case
   AMNoAuth -> False
-  _        -> True
+  _ -> True
 
 isAuthHookSet :: AuthMode -> Bool
 isAuthHookSet = \case
+  AMHook _ -> True
   AMAdminSecretAndHook _ _ -> True
-  _                        -> False
+  _ -> False
 
 isJWTSet :: AuthMode -> Bool
 isJWTSet = \case
-  AMAdminSecretAndJWT{} -> True
-  _                     -> False
+  AMJWT {} -> True
+  AMAdminSecretAndJWT {} -> True
+  _ -> False
 
-getJWTInfo :: AuthMode -> Maybe JWTInfo
-getJWTInfo (AMAdminSecretAndJWT _ jwtCtx _) =
-  Just $ case jcxClaims jwtCtx of
-    JCNamespace namespace claimsFormat ->
-      JWTInfo namespace claimsFormat Nothing
-    JCMap claimsMap ->
-      JWTInfo (ClaimNs defaultClaimsNamespace) defaultClaimsFormat $ Just claimsMap
-getJWTInfo _ = Nothing
+getJWTInfo :: AuthMode -> [JWTInfo]
+getJWTInfo (AMJWT jwtCtxs _) = getJWTInfo' jwtCtxs
+getJWTInfo (AMAdminSecretAndJWT _ jwtCtxs _) = getJWTInfo' jwtCtxs
+getJWTInfo _ = mempty
+
+getJWTInfo' :: [JWTCtx] -> [JWTInfo]
+getJWTInfo' jwtCtxs =
+  let f jwtCtx = case jcxClaims jwtCtx of
+        JCNamespace namespace claimsFormat ->
+          JWTInfo namespace claimsFormat Nothing
+        JCMap claimsMap ->
+          JWTInfo (ClaimNs defaultClaimsNamespace) defaultClaimsFormat $ Just claimsMap
+   in fmap f jwtCtxs

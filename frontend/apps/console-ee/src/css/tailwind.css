@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/*
+ * Dark mode is driven by the `.dark` class the shared ThemeProvider sets on
+ * <html> (see libs/shared/ui/src/theme). `dark:` utilities apply to the `.dark`
+ * element and anything inside it.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* @config "../../../../tailwind.config.js"; */
+
+/*
+ * Tailwind v4's automatic content detection is relative to where the build
+ * tool tells postcss it's running from, which changed when the app's build
+ * moved off the old Nx executor onto a per-project webpack.config.js run
+ * via `webpack-cli` (cwd: apps/console-ee, not the workspace root). The
+ * config above has no v3-style `content` array, so without an explicit
+ * source here Tailwind silently finds none of this app's actual component
+ * source and only emits its own always-on base/preflight utilities.
+ */
+@source "../../../../libs";
+@source "../../../console-ce/src";
+@source "../../../console-ee/src";

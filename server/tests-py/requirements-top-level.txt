@@ -1,13 +1,24 @@
-psycopg2-binary
-sqlalchemy
-pytest==4.5.0
-pytest-xdist
-requests
-pyyaml
-websocket-client
-pyjwt >= 1.5.3
-jsondiff
-cryptography
-graphene
-ruamel.yaml > 0.15
+# Direct dependencies go here.
+# Regenerate requirements.txt by running `make server/tests-py/requirements.txt`.
+
+croniter
+cryptography == 3.*  # later versions require Rust support
+graphene == 2.*  # v3 has changed the API
 graphql-core
+jsondiff
+psycopg2-binary
+PyJWT == 2.3.*  # v2.4 disallows the key format we use
+pytest == 6.2.5
+pytest-durations
+pytest-fixture-order
+pytest-xdist
+PyYAML
+redis
+requests
+ruamel.yaml >= 0.17.32  # earlier versions have ruamel.yaml.clib incompatibility with Python 3.12
+sqlalchemy == 1.*  # v2 changes the API
+websocket-client == 0.56.0  # 0.58.0 and above changed the function signatures of callbacks
+
+# Security floors for the HTTP test tooling (transitive dependencies of requests).
+certifi >= 2026.10.19
+urllib3 >= 2.8.0

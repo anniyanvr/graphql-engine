@@ -1,82 +1,98 @@
-{-# LANGUAGE RecordWildCards #-}
 module Hasura.RQL.DDL.Action
-  ( CreateAction
-  , runCreateAction
-  , persistCreateAction
-  , resolveAction
+  ( CreateAction (..),
+    runCreateAction,
+    resolveAction,
+    UpdateAction,
+    runUpdateAction,
+    DropAction,
+    runDropAction,
+    dropActionInMetadata,
+    CreateActionPermission (..),
+    runCreateActionPermission,
+    DropActionPermission,
+    runDropActionPermission,
+    dropActionPermissionInMetadata,
+  )
+where
 
-  , UpdateAction
-  , runUpdateAction
+import Control.Lens ((.~), (^.))
+import Data.Aeson qualified as J
+import Data.Environment qualified as Env
+import Data.HashMap.Strict qualified as HashMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
+import Data.List.NonEmpty qualified as NEList
+import Data.Text.Extended
+import Data.URL.Template (printTemplate)
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Base.Error
+import Hasura.EncJSON
+import Hasura.Metadata.Class
+import Hasura.Prelude
+import Hasura.RQL.DDL.CustomTypes (ScalarParsingMap (..), lookupBackendScalar, lookupBackendScalarWithAliases)
+import Hasura.RQL.Types.Action
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.CustomTypes
+import Hasura.RQL.Types.Metadata
+import Hasura.RQL.Types.Metadata.Object
+import Hasura.RQL.Types.SchemaCache
+import Hasura.RQL.Types.SchemaCache.Build
+import Hasura.SQL.BackendMap (BackendMap)
+import Language.GraphQL.Draft.Syntax qualified as G
 
-  , DropAction
-  , runDropAction
-  , deleteActionFromCatalog
-
-  , fetchActions
-
-  , CreateActionPermission
-  , runCreateActionPermission
-  , persistCreateActionPermission
-
-  , DropActionPermission
-  , runDropActionPermission
-  , deleteActionPermissionFromCatalog
-  ) where
-
-import           Hasura.Prelude
-
-import qualified Data.Aeson                         as J
-import qualified Data.Aeson.Casing                  as J
-import qualified Data.Aeson.TH                      as J
-import qualified Data.Environment                   as Env
-import qualified Data.HashMap.Strict                as Map
-import qualified Database.PG.Query                  as Q
-import qualified Language.GraphQL.Draft.Syntax      as G
-
-import           Data.Text.Extended
-
-import           Hasura.Backends.Postgres.SQL.Types
-import           Hasura.EncJSON
-import           Hasura.GraphQL.Utils
-import           Hasura.RQL.DDL.CustomTypes         (lookupPGScalar)
-import           Hasura.RQL.Types
-import           Hasura.Session
-
-
-getActionInfo
-  :: (QErrM m, CacheRM m)
-  => ActionName -> m (ActionInfo 'Postgres)
+getActionInfo ::
+  (QErrM m, CacheRM m) =>
+  ActionName ->
+  m ActionInfo
 getActionInfo actionName = do
   actionMap <- scActions <$> askSchemaCache
-  Map.lookup actionName actionMap
-    `onNothing`
-    throw400 NotExists
-    ("action with name " <> actionName <<> " does not exist")
+  onNothing (HashMap.lookup actionName actionMap)
+    $ throw400 NotExists
+    $ "action with name "
+    <> actionName
+    <<> " does not exist"
 
-runCreateAction
-  :: (QErrM m , CacheRWM m, MonadTx m)
-  => CreateAction -> m EncJSON
+data CreateAction = CreateAction
+  { _caName :: ActionName,
+    _caDefinition :: ActionDefinitionInput,
+    _caComment :: Maybe Text
+  }
+  deriving stock (Generic)
+
+instance J.FromJSON CreateAction where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON CreateAction where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
+
+runCreateAction ::
+  (QErrM m, CacheRWM m, MetadataM m) =>
+  CreateAction ->
+  m EncJSON
 runCreateAction createAction = do
   -- check if action with same name exists already
   actionMap <- scActions <$> askSchemaCache
-  void $ onJust (Map.lookup actionName actionMap) $ const $
-    throw400 AlreadyExists $
-      "action with name " <> actionName <<> " already exists"
-  persistCreateAction createAction
-  buildSchemaCacheFor $ MOAction actionName
+  for_ (HashMap.lookup actionName actionMap)
+    $ const
+    $ throw400 AlreadyExists
+    $ "action with name "
+    <> actionName
+    <<> " already exists"
+  let metadata =
+        ActionMetadata
+          actionName
+          (_caComment createAction)
+          (_caDefinition createAction)
+          []
+  buildSchemaCacheFor (MOAction actionName)
+    $ MetadataModifier
+    $ metaActions
+    %~ InsOrdHashMap.insert actionName metadata
   pure successMsg
   where
     actionName = _caName createAction
 
-persistCreateAction :: (MonadTx m) =>  CreateAction -> m ()
-persistCreateAction (CreateAction actionName actionDefinition comment) = do
-  liftTx $ Q.unitQE defaultTxErrorHandler [Q.sql|
-    INSERT into hdb_catalog.hdb_action
-      (action_name, action_defn, comment)
-      VALUES ($1, $2, $3)
-  |] (actionName, Q.AltJ actionDefinition, comment) True
-
-{-| Note [Postgres scalars in action input arguments]
+{- Note [Postgres scalars in action input arguments]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 It's very comfortable to be able to reference Postgres scalars in actions
 input arguments. For example, see the following action mutation:
@@ -94,64 +110,145 @@ takes all Postgres scalar types as one of the inputs and returns the set of
 referred scalars.
 -}
 
-resolveAction
-  :: QErrM m
-  => Env.Environment
-  -> AnnotatedCustomTypes 'Postgres
-  -> ActionDefinitionInput
-  -> HashSet PGScalarType -- See Note [Postgres scalars in custom types]
-  -> m ( ResolvedActionDefinition
-       , AnnotatedObjectType 'Postgres
-       )
-resolveAction env AnnotatedCustomTypes{..} ActionDefinition{..} allPGScalars = do
+resolveAction ::
+  (QErrM m) =>
+  Env.Environment ->
+  AnnotatedCustomTypes ->
+  ActionDefinitionInput ->
+  BackendMap ScalarParsingMap -> -- See Note [Postgres scalars in custom types]
+  m
+    ( ResolvedActionDefinition,
+      AnnotatedOutputType
+    )
+resolveAction env AnnotatedCustomTypes {..} ActionDefinition {..} allScalars = do
   resolvedArguments <- forM _adArguments $ \argumentDefinition -> do
     forM argumentDefinition $ \argumentType -> do
       let gType = unGraphQLType argumentType
           argumentBaseType = G.getBaseType gType
-      (gType,) <$>
-        if | Just pgScalar <- lookupPGScalar allPGScalars argumentBaseType ->
-               pure $ NOCTScalar $ ASTReusedScalar argumentBaseType pgScalar
-           | Just nonObjectType <- Map.lookup argumentBaseType _actNonObjects ->
-               pure nonObjectType
-           | otherwise ->
-               throw400 InvalidParams $
-               "the type: " <> showName argumentBaseType
-               <> " is not defined in custom types or it is not a scalar/enum/input_object"
+      (gType,)
+        <$> if
+          | Just noCTScalar <- lookupBackendScalar allScalars argumentBaseType ->
+              pure $ NOCTScalar noCTScalar
+          | Just nonObjectType <- HashMap.lookup argumentBaseType _actInputTypes ->
+              pure nonObjectType
+          | Just scalar <- lookupBackendScalarWithAliases allScalars argumentBaseType ->
+              pure $ NOCTScalar scalar
+          | otherwise ->
+              throw400 InvalidParams
+                $ "the type: "
+                <> dquote argumentBaseType
+                <> " is not defined in custom types or it is not a scalar/enum/input_object"
 
   -- Check if the response type is an object
   let outputType = unGraphQLType _adOutputType
       outputBaseType = G.getBaseType outputType
-  outputObject <- onNothing (Map.lookup outputBaseType _actObjects) $
-    throw400 NotExists $ "the type: " <> showName outputBaseType
-    <> " is not an object type defined in custom types"
+  outputObject <- do
+    aot <-
+      if
+        | Just aoTScalar <- lookupBackendScalar allScalars outputBaseType ->
+            pure $ AOTScalar aoTScalar
+        | Just objectType <- HashMap.lookup outputBaseType _actObjectTypes ->
+            pure $ AOTObject objectType
+        | Just (NOCTScalar s) <- HashMap.lookup outputBaseType _actInputTypes ->
+            pure (AOTScalar s)
+        | Just scalar <- lookupBackendScalarWithAliases allScalars outputBaseType ->
+            pure $ AOTScalar scalar
+        | otherwise ->
+            throw400 NotExists ("the type: " <> dquote outputBaseType <> " is not an object or scalar type defined in custom types")
+    -- If the Action is sync:
+    --      1. Check if the output type has only top level relations (if any)
+    --   If the Action is async:
+    --      1. Check that the output type has no relations if the output type contains nested objects
+    -- These checks ensure that the SQL we generate for the join does not have to extract nested fields
+    -- from the action webhook response.
+    let (nestedObjects, scalarOrEnumFields) = case aot of
+          AOTObject aot' ->
+            NEList.partition
+              ( \ObjectFieldDefinition {..} ->
+                  case snd _ofdType of
+                    AOFTScalar _ -> False
+                    AOFTEnum _ -> False
+                    AOFTObject _ -> True
+              )
+              (_aotFields aot')
+          AOTScalar _ -> ([], [])
+        scalarOrEnumFieldNames = fmap (\ObjectFieldDefinition {..} -> unObjectFieldName _ofdName) scalarOrEnumFields
+        validateSyncAction = case aot of
+          AOTObject aot' -> do
+            let relationshipsWithNonTopLevelFields =
+                  filter
+                    ( \AnnotatedTypeRelationship {..} ->
+                        let objsInRel = unObjectFieldName <$> HashMap.keys _atrFieldMapping
+                         in not $ all (`elem` scalarOrEnumFieldNames) objsInRel
+                    )
+                    (_aotRelationships aot')
+            unless (null relationshipsWithNonTopLevelFields)
+              $ throw400 ConstraintError
+              $ "Relationships cannot be defined with nested object fields: "
+              <> commaSeparated (dquote . _atrName <$> relationshipsWithNonTopLevelFields)
+          AOTScalar _ -> pure ()
+    case _adType of
+      ActionQuery -> validateSyncAction
+      ActionMutation ActionSynchronous -> validateSyncAction
+      ActionMutation ActionAsynchronous -> case aot of
+        AOTScalar _ -> pure ()
+        AOTObject aot' ->
+          unless (null (_aotRelationships aot') || null nestedObjects)
+            $ throw400 ConstraintError
+            $ "Async action relations cannot be used with object fields: "
+            <> commaSeparated (dquote . _ofdName <$> nestedObjects)
+    pure aot
   resolvedWebhook <- resolveWebhook env _adHandler
-  pure ( ActionDefinition resolvedArguments _adOutputType _adType
-         _adHeaders _adForwardClientHeaders _adTimeout resolvedWebhook
-       , outputObject
-       )
+  let webhookEnvRecord = EnvRecord (printTemplate $ unInputWebhook _adHandler) resolvedWebhook
+  pure
+    ( ActionDefinition
+        resolvedArguments
+        _adOutputType
+        _adType
+        _adHeaders
+        _adForwardClientHeaders
+        _adIgnoredClientHeaders
+        _adTimeout
+        webhookEnvRecord
+        _adRequestTransform
+        _adResponseTransform,
+      outputObject
+    )
 
-runUpdateAction
-  :: forall m. ( QErrM m , CacheRWM m, MonadTx m)
-  => UpdateAction -> m EncJSON
-runUpdateAction (UpdateAction actionName actionDefinition) = do
+data UpdateAction = UpdateAction
+  { _uaName :: ActionName,
+    _uaDefinition :: ActionDefinitionInput,
+    _uaComment :: Maybe Text
+  }
+  deriving stock (Generic)
+
+instance J.FromJSON UpdateAction where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+runUpdateAction ::
+  forall m.
+  (QErrM m, CacheRWM m, MetadataM m) =>
+  UpdateAction ->
+  m EncJSON
+runUpdateAction (UpdateAction actionName actionDefinition actionComment) = do
   sc <- askSchemaCache
   let actionsMap = scActions sc
-  void $ onNothing (Map.lookup actionName actionsMap) $
-    throw400 NotExists $ "action with name " <> actionName <<> " not exists"
-  updateActionInCatalog
-  buildSchemaCacheFor $ MOAction actionName
+  void
+    $ onNothing (HashMap.lookup actionName actionsMap)
+    $ throw400 NotExists
+    $ "action with name "
+    <> actionName
+    <<> " does not exist"
+  buildSchemaCacheFor (MOAction actionName) $ updateActionMetadataModifier actionDefinition actionComment
   pure successMsg
   where
-    updateActionInCatalog :: m ()
-    updateActionInCatalog =
-      liftTx $ Q.unitQE defaultTxErrorHandler [Q.sql|
-        UPDATE hdb_catalog.hdb_action
-           SET action_defn = $2
-         WHERE action_name = $1
-      |] (actionName, Q.AltJ actionDefinition) True
+    updateActionMetadataModifier :: ActionDefinitionInput -> Maybe Text -> MetadataModifier
+    updateActionMetadataModifier def comment =
+      MetadataModifier
+        $ (metaActions . ix actionName . amDefinition .~ def)
+        . (metaActions . ix actionName . amComment .~ comment)
 
-newtype ClearActionData
-  = ClearActionData { unClearActionData :: Bool }
+newtype ClearActionData = ClearActionData {unClearActionData :: Bool}
   deriving (Show, Eq, J.FromJSON, J.ToJSON)
 
 shouldClearActionData :: ClearActionData -> Bool
@@ -160,118 +257,119 @@ shouldClearActionData = unClearActionData
 defaultClearActionData :: ClearActionData
 defaultClearActionData = ClearActionData True
 
-data DropAction
-  = DropAction
-  { _daName      :: !ActionName
-  , _daClearData :: !(Maybe ClearActionData)
-  } deriving (Show, Eq)
-$(J.deriveJSON (J.aesonDrop 3 J.snakeCase) ''DropAction)
+data DropAction = DropAction
+  { _daName :: ActionName,
+    _daClearData :: Maybe ClearActionData
+  }
+  deriving (Show, Generic, Eq)
 
-runDropAction
-  :: (QErrM m, CacheRWM m, MonadTx m)
-  => DropAction -> m EncJSON
-runDropAction (DropAction actionName clearDataM)= do
+instance J.FromJSON DropAction where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON DropAction where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
+
+runDropAction ::
+  ( MonadError QErr m,
+    CacheRWM m,
+    MetadataM m,
+    MonadMetadataStorage m
+  ) =>
+  DropAction ->
+  m EncJSON
+runDropAction (DropAction actionName clearDataM) = do
   void $ getActionInfo actionName
-  liftTx $ do
-    deleteActionPermissionsFromCatalog
-    deleteActionFromCatalog actionName clearDataM
-  buildSchemaCacheStrict
+  withNewInconsistentObjsCheck
+    $ buildSchemaCache
+    $ dropActionInMetadata actionName
+  when (shouldClearActionData clearData) $ liftEitherM $ deleteActionData actionName
   return successMsg
-  where
-    deleteActionPermissionsFromCatalog =
-      Q.unitQE defaultTxErrorHandler [Q.sql|
-          DELETE FROM hdb_catalog.hdb_action_permission
-            WHERE action_name = $1
-          |] (Identity actionName) True
-
-deleteActionFromCatalog
-  :: ActionName
-  -> Maybe ClearActionData
-  -> Q.TxE QErr ()
-deleteActionFromCatalog actionName clearDataM = do
-  Q.unitQE defaultTxErrorHandler [Q.sql|
-      DELETE FROM hdb_catalog.hdb_action
-        WHERE action_name = $1
-      |] (Identity actionName) True
-  when (shouldClearActionData clearData) $
-    clearActionDataFromCatalog actionName
   where
     -- When clearData is not present we assume that
     -- the data needs to be retained
     clearData = fromMaybe defaultClearActionData clearDataM
 
-clearActionDataFromCatalog :: ActionName -> Q.TxE QErr ()
-clearActionDataFromCatalog actionName =
-  Q.unitQE defaultTxErrorHandler [Q.sql|
-      DELETE FROM hdb_catalog.hdb_action_log
-        WHERE action_name = $1
-      |] (Identity actionName) True
+dropActionInMetadata :: ActionName -> MetadataModifier
+dropActionInMetadata name =
+  MetadataModifier $ metaActions %~ InsOrdHashMap.delete name
 
-fetchActions :: Q.TxE QErr [CreateAction]
-fetchActions =
-  map fromRow <$> Q.listQE defaultTxErrorHandler
-    [Q.sql|
-     SELECT action_name, action_defn, comment
-       FROM hdb_catalog.hdb_action
-       ORDER BY action_name ASC
-     |] () True
-  where
-    fromRow (actionName, Q.AltJ definition, comment) =
-      CreateAction actionName definition comment
-
-newtype ActionMetadataField
-  = ActionMetadataField { unActionMetadataField :: Text }
+newtype ActionMetadataField = ActionMetadataField {unActionMetadataField :: Text}
   deriving (Show, Eq, J.FromJSON, J.ToJSON)
 
-runCreateActionPermission
-  :: (QErrM m , CacheRWM m, MonadTx m)
-  => CreateActionPermission -> m EncJSON
+doesActionPermissionExist :: Metadata -> ActionName -> RoleName -> Bool
+doesActionPermissionExist metadata actionName roleName =
+  any ((== roleName) . _apmRole) $ metadata ^. (metaActions . ix actionName . amPermissions)
+
+data CreateActionPermission = CreateActionPermission
+  { _capAction :: ActionName,
+    _capRole :: RoleName,
+    _capDefinition :: Maybe J.Value,
+    _capComment :: Maybe Text
+  }
+  deriving stock (Generic)
+
+instance J.FromJSON CreateActionPermission where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+runCreateActionPermission ::
+  (QErrM m, CacheRWM m, MetadataM m) =>
+  CreateActionPermission ->
+  m EncJSON
 runCreateActionPermission createActionPermission = do
-  actionInfo <- getActionInfo actionName
-  void $ onJust (Map.lookup roleName $ _aiPermissions actionInfo) $ const $
-    throw400 AlreadyExists $ "permission for role " <> roleName
-    <<> " is already defined on " <>> actionName
-  persistCreateActionPermission createActionPermission
-  buildSchemaCacheFor $ MOActionPermission actionName roleName
+  metadata <- getMetadata
+  when (doesActionPermissionExist metadata actionName roleName)
+    $ throw400 AlreadyExists
+    $ "permission for role "
+    <> roleName
+    <<> " is already defined on "
+    <>> actionName
+  buildSchemaCacheFor (MOActionPermission actionName roleName)
+    $ MetadataModifier
+    $ metaActions
+    . ix actionName
+    . amPermissions
+    %~ (:) (ActionPermissionMetadata roleName comment)
   pure successMsg
   where
-    actionName = _capAction createActionPermission
-    roleName = _capRole createActionPermission
+    CreateActionPermission actionName roleName _ comment = createActionPermission
 
-persistCreateActionPermission :: (MonadTx m) => CreateActionPermission -> m ()
-persistCreateActionPermission CreateActionPermission{..}= do
-  liftTx $ Q.unitQE defaultTxErrorHandler [Q.sql|
-    INSERT into hdb_catalog.hdb_action_permission
-      (action_name, role_name, comment)
-      VALUES ($1, $2, $3)
-  |] (_capAction, _capRole, _capComment) True
+data DropActionPermission = DropActionPermission
+  { _dapAction :: ActionName,
+    _dapRole :: RoleName
+  }
+  deriving (Show, Generic, Eq)
 
-data DropActionPermission
-  = DropActionPermission
-  { _dapAction :: !ActionName
-  , _dapRole   :: !RoleName
-  } deriving (Show, Eq)
-$(J.deriveJSON (J.aesonDrop 4 J.snakeCase) ''DropActionPermission)
+instance J.FromJSON DropActionPermission where
+  parseJSON = J.genericParseJSON hasuraJSON
 
-runDropActionPermission
-  :: (QErrM m, CacheRWM m, MonadTx m)
-  => DropActionPermission -> m EncJSON
+instance J.ToJSON DropActionPermission where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
+
+runDropActionPermission ::
+  (QErrM m, CacheRWM m, MetadataM m) =>
+  DropActionPermission ->
+  m EncJSON
 runDropActionPermission dropActionPermission = do
-  actionInfo <- getActionInfo actionName
-  void $ onNothing (Map.lookup roleName $ _aiPermissions actionInfo) $
-    throw400 NotExists $
-    "permission for role: " <> roleName <<> " is not defined on " <>> actionName
-  liftTx $ deleteActionPermissionFromCatalog actionName roleName
-  buildSchemaCacheFor $ MOActionPermission actionName roleName
+  metadata <- getMetadata
+  unless (doesActionPermissionExist metadata actionName roleName)
+    $ throw400 NotExists
+    $ "permission for role: "
+    <> roleName
+    <<> " is not defined on "
+    <>> actionName
+  buildSchemaCacheFor (MOActionPermission actionName roleName)
+    $ dropActionPermissionInMetadata actionName roleName
   return successMsg
   where
     actionName = _dapAction dropActionPermission
     roleName = _dapRole dropActionPermission
 
-deleteActionPermissionFromCatalog :: ActionName -> RoleName -> Q.TxE QErr ()
-deleteActionPermissionFromCatalog actionName role =
-  Q.unitQE defaultTxErrorHandler [Q.sql|
-      DELETE FROM hdb_catalog.hdb_action_permission
-        WHERE action_name = $1
-          AND role_name = $2
-      |] (actionName, role) True
+dropActionPermissionInMetadata :: ActionName -> RoleName -> MetadataModifier
+dropActionPermissionInMetadata name role =
+  MetadataModifier
+    $ metaActions
+    . ix name
+    . amPermissions
+    %~ filter ((/=) role . _apmRole)
